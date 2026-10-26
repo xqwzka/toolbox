@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import AVFoundation
 import Photos
 import PhotosUI
@@ -156,7 +157,7 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
     }
     writer.startWriting()
     writer.startSession(atSourceTime: .zero)
-    func metadataItem(key: String, value: NSObject) -> AVMutableMetadataItem {
+    func metadataItem(key: String, value: (NSCopying & NSObjectProtocol)) -> AVMutableMetadataItem {
         let item = AVMutableMetadataItem()
         item.keySpace = .quickTimeMetadata
         item.key = key as NSString
@@ -171,7 +172,8 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
         items: [metadataItem(key: "com.apple.quicktime.still-image-time", value: NSValue(time: stillTime))],
         timeRange: CMTimeRange(start: stillTime, duration: CMTime(seconds: 0.1, preferredTimescale: 600))
     )
-    _ = metadataAdaptor.append([identifierGroup, stillGroup])
+    _ = metadataAdaptor.append(identifierGroup)
+    _ = metadataAdaptor.append(stillGroup)
     let writingQueue = DispatchQueue(label: "livephoto.writer")
     return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
         let group = DispatchGroup()
