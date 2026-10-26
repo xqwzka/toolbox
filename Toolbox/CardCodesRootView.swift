@@ -104,7 +104,7 @@ struct CardCodesRootView: View {
     private var codeList: some View {
         Group {
             if filteredCodes.isEmpty {
-                EmptyStateView(isSearching: !searchText.trimmingCharacters(in: .whitespaces).isEmpty)
+                CardEmptyStateView(isSearching: !searchText.trimmingCharacters(in: .whitespaces).isEmpty)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
@@ -267,7 +267,7 @@ private struct FilterPill: View {
     }
 }
 
-private struct EmptyStateView: View {
+private struct CardEmptyStateView: View {
     let isSearching: Bool
 
     var body: some View {
