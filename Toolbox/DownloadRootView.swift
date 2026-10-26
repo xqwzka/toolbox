@@ -22,6 +22,7 @@ struct DownloadRootView: View {
     @State private var downloadingVideo = false
     @State private var downloadingImages: Set<String> = []
     @State private var downloadingAll = false
+    @State private var downloadingLivePhotos: Set<String> = []
     @State private var showCobalt = false
     @State private var liveVideoURL: URL?
     @State private var liveVideoName = ""
@@ -159,6 +160,47 @@ struct DownloadRootView: View {
                 .background(Color.white)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
             }
+            if !parsed.livePhotos.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("动图 \(parsed.livePhotos.count) 张 · 保存为 Live Photo")
+                        .font(.headline)
+                    ForEach(parsed.livePhotos, id: \.videoURL.absoluteString) { item in
+                        HStack(spacing: 12) {
+                            AsyncImage(url: item.coverURL) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image
+                                        .resizable()
+                                        .scaledToFill()
+                                default:
+                                    Color.gray.opacity(0.2)
+                                }
+                            }
+                            .frame(width: 72, height: 72)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Live Photo")
+                                    .font(.headline)
+                                Text("静态图 + 动效视频，存为一张实况照片")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
+                            Spacer()
+                            if downloadingLivePhotos.contains(item.videoURL.absoluteString) {
+                                ProgressView()
+                            } else {
+                                Button("保存") {
+                                    Task { await downloadLivePhoto(item) }
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                        }
+                        .padding(12)
+                        .background(Color.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                }
+            }
             if !parsed.images.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
@@ -240,6 +282,24 @@ struct DownloadRootView: View {
             }
         } catch {
             showToast("下载失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
+        }
+    }
+
+    private func downloadLivePhoto(_ item: LivePhotoItem) async {
+        downloadingLivePhotos.insert(item.videoURL.absoluteString)
+        defer { downloadingLivePhotos.remove(item.videoURL.absoluteString) }
+        do {
+            let coverData = try await downloadData(from: item.coverURL)
+            guard let coverImage = UIImage(data: coverData),
+                  let jpegData = coverImage.jpegData(compressionQuality: 0.92) else {
+                showToast("动图封面读取失败")
+                return
+            }
+            let videoFile = try await downloadFile(from: item.videoURL)
+            try await saveLivePhoto(photoData: jpegData, videoURL: videoFile)
+            showToast("已保存为 Live Photo，去相册长按播放")
+        } catch {
+            showToast("保存失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
         }
     }
 

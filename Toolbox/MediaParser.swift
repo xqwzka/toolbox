@@ -17,6 +17,15 @@ enum DownloadPlatform: String {
 /// separate audio track to mux) plus zero or more images. Images
 /// are always downloaded one by one; the grid never forces a
 /// whole-album download.
+/// One Douyin live photo (动图): a still cover plus its motion
+/// video. 洛天 returns these under "livephotos"; the generic
+/// scan also picks the two files up separately, but only this
+/// pairing lets the app save them as one Live Photo.
+struct LivePhotoItem {
+    let coverURL: URL
+    let videoURL: URL
+}
+
 struct ParsedMedia {
     let platform: DownloadPlatform
     let source: String
@@ -24,6 +33,7 @@ struct ParsedMedia {
     let videoQuality: String?
     let audioURL: URL?
     let images: [URL]
+    var livePhotos: [LivePhotoItem] = []
 }
 
 enum ParseError: Error, LocalizedError {
@@ -271,6 +281,21 @@ private func parseLuotian(shareText: String, platform: DownloadPlatform) async t
     scan(json)
     videos = dedupe(videos)
     images = dedupe(images)
+    // Douyin live photos (动图): keep the cover+video pairs, so
+    // the UI can save each as one Live Photo instead of two
+    // separate files.
+    var livePhotos: [LivePhotoItem] = []
+    if let dict = json as? [String: Any],
+       let items = dict["livephotos"] as? [[String: Any]] {
+        for item in items {
+            if let coverString = item["cover"] as? String,
+               let videoString = item["video"] as? String,
+               let coverURL = URL(string: coverString),
+               let videoURL = URL(string: videoString) {
+                livePhotos.append(LivePhotoItem(coverURL: coverURL, videoURL: videoURL))
+            }
+        }
+    }
     // Prefer a plain mp4 over an HLS playlist when both show up.
     let videoURL = (videos.first(where: { $0.lowercased().contains(".mp4") }) ?? videos.first).flatMap(URL.init)
     guard videoURL != nil || !images.isEmpty else {
@@ -282,7 +307,8 @@ private func parseLuotian(shareText: String, platform: DownloadPlatform) async t
         videoURL: videoURL,
         videoQuality: nil,
         audioURL: nil,
-        images: images.compactMap(URL.init)
+        images: images.compactMap(URL.init),
+        livePhotos: livePhotos
     )
 }
 

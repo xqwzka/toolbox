@@ -16,7 +16,7 @@ struct ToolboxRootView: View {
     @State private var tab: ToolboxTab = .ledger
     @State private var showingSwitcher = false
     @State private var floatPosition = CGSize.zero
-    @GestureState private var dragTranslation = CGSize.zero
+    @State private var dragTranslation = CGSize.zero
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -34,33 +34,39 @@ struct ToolboxRootView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            Button {
-                showingSwitcher = true
-            } label: {
-                Image(systemName: "rectangle.3.offgrid.fill")
-                    .font(.title3)
-                    .frame(width: 56, height: 56)
-                    .liquidGlassCircle()
-            }
-            // Draggable: dragging moves it, a plain tap still
-            // opens the switcher (DragGesture's 10pt threshold
-            // lets taps through). Clamped on release so it
-            // cannot be dragged off screen.
-            .offset(CGSize(width: floatPosition.width + dragTranslation.width,
-                           height: floatPosition.height + dragTranslation.height))
-            .gesture(
-                DragGesture()
-                    .updating($dragTranslation) { value, state, _ in
-                        state = value.translation
-                    }
-                    .onEnded { value in
-                        floatPosition = CGSize(
-                            width: min(20, max(-300, floatPosition.width + value.translation.width)),
-                            height: min(20, max(-500, floatPosition.height + value.translation.height))
-                        )
-                    }
-            )
-            .padding(.trailing, 20)
+            // Draggable switch button. NOT a Button: a Button's
+            // tap gesture swallows the drag, so the button never
+            // followed the finger. This is a plain view with a
+            // DragGesture (minimumDistance 0, so it tracks from
+            // touch-down): a small movement on release counts as
+            // a tap and opens the switcher, a real drag moves it.
+            // Clamped on release so it cannot be dragged off
+            // screen.
+            Image(systemName: "rectangle.3.offgrid.fill")
+                .font(.title3)
+                .frame(width: 56, height: 56)
+                .liquidGlassCircle()
+                .contentShape(Circle())
+                .offset(CGSize(width: floatPosition.width + dragTranslation.width,
+                               height: floatPosition.height + dragTranslation.height))
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            dragTranslation = value.translation
+                        }
+                        .onEnded { value in
+                            dragTranslation = .zero
+                            if abs(value.translation.width) < 10 && abs(value.translation.height) < 10 {
+                                showingSwitcher = true
+                            } else {
+                                floatPosition = CGSize(
+                                    width: min(20, max(-300, floatPosition.width + value.translation.width)),
+                                    height: min(20, max(-500, floatPosition.height + value.translation.height))
+                                )
+                            }
+                        }
+                )
+                .padding(.trailing, 20)
             // Clears the ledger tab's own bottom bar; on the other
             // tabs it simply floats a little higher.
             .padding(.bottom, 110)

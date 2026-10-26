@@ -101,10 +101,12 @@ private func extractStillFrame(videoURL: URL, at seconds: Double) throws -> Data
     return data
 }
 
-/// The pairing itself: photo and video in ONE creation request,
-/// which is what makes Photos treat them as a single Live Photo
-/// instead of two separate assets.
-private func saveLivePhoto(photoData: Data, videoURL: URL) async throws {
+/// The pairing itself: photo + PAIRED video in ONE creation
+/// request, which is what makes Photos treat them as a single
+/// Live Photo instead of two separate assets. The video type
+/// must be .pairedVideo: .video was tried first and Photos
+/// rejected the save with PHPhotosErrorDomain 3302.
+func saveLivePhoto(photoData: Data, videoURL: URL) async throws {
     guard await requestPhotoAddAccess() else {
         throw LivePhotoError.photoDenied
     }
@@ -112,7 +114,7 @@ private func saveLivePhoto(photoData: Data, videoURL: URL) async throws {
         PHPhotoLibrary.shared().performChanges({
             let request = PHAssetCreationRequest.forAsset()
             request.addResource(with: .photo, data: photoData, options: nil)
-            request.addResource(with: .video, fileURL: videoURL, options: nil)
+            request.addResource(with: .pairedVideo, fileURL: videoURL, options: nil)
         }) { success, error in
             if success {
                 continuation.resume()
