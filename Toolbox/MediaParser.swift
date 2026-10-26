@@ -38,6 +38,10 @@ struct ParsedMedia {
     /// the UI shows all of them as thumbnails instead of only
     /// the first one, so multi-video posts stop collapsing.
     var videos: [URL] = []
+    /// Download size of the main video in bytes (video + audio
+    /// track when split). Nil when it could not be read — the
+    /// UI shows nothing then, never a guess.
+    var videoSizeBytes: Int64? = nil
 }
 
 enum ParseError: Error, LocalizedError {
@@ -170,20 +174,70 @@ func parseMedia(input: String, cobaltInstance: String?) async throws -> ParsedMe
         throw ParseError.unsupported
     }
     let cobalt = (cobaltInstance ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    var parsed: ParsedMedia
     if !cobalt.isEmpty, platform == .youtube || platform == .twitter || platform == .instagram {
-        return try await parseCobalt(instance: cobalt, urlString: urlString, platform: platform)
+        parsed = try await parseCobalt(instance: cobalt, urlString: urlString, platform: platform)
+    } else {
+        switch platform {
+        case .douyin, .xiaohongshu, .kuaishou, .bilibili:
+            parsed = try await parseLuotian(shareText: input, platform: platform)
+        case .instagram:
+            parsed = try await parseInstagram(urlString)
+        case .twitter:
+            parsed = try await parseX(urlString)
+        case .youtube:
+            parsed = try await parseYouTube(urlString)
+        case .unknown:
+            throw ParseError.unsupported
+        }
     }
-    switch platform {
-    case .douyin, .xiaohongshu, .kuaishou, .bilibili:
-        return try await parseLuotian(shareText: input, platform: platform)
-    case .instagram:
-        return try await parseInstagram(urlString)
-    case .twitter:
-        return try await parseX(urlString)
-    case .youtube:
-        return try await parseYouTube(urlString)
-    case .unknown:
-        throw ParseError.unsupported
+    // Show the download size when it can be read: YouTube
+    // already carries it (clen params); everyone else gets a
+    // zero-body range probe. Unknown stays blank, never a guess.
+    if parsed.videoSizeBytes == nil, let videoURL = parsed.videoURL {
+        parsed.videoSizeBytes = await fetchVideoSize(videoURL)
+    }
+    return parsed
+}
+
+/// Zero-body size probe: a Range request for byte 0, cancelled
+/// as soon as headers arrive. Content-Range carries the total
+/// for a 206; a Range-ignoring server answers 200 with
+/// Content-Length instead. Either way no body downloads.
+private func fetchVideoSize(_ url: URL) async -> Int64? {
+    final class Delegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        var continuation: CheckedContinuation<Int64?, Never>?
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            var size: Int64?
+            if let http = response as? HTTPURLResponse {
+                if let range = http.value(forHTTPHeaderField: "Content-Range"),
+                   let total = range.split(separator: "/").last,
+                   let value = Int64(total) {
+                    size = value
+                } else if let length = http.value(forHTTPHeaderField: "Content-Length"),
+                          let value = Int64(length) {
+                    size = value
+                }
+            }
+            continuation?.resume(returning: size)
+            continuation = nil
+            completionHandler(.cancel)
+        }
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            continuation?.resume(returning: nil)
+            continuation = nil
+        }
+    }
+    let delegate = Delegate()
+    let config = URLSessionConfiguration.default
+    config.timeoutIntervalForRequest = 8
+    let session = URLSession(configuration: config, delegate: delegate, delegateQueue: .main)
+    defer { session.finishTasksAndInvalidate() }
+    var request = URLRequest(url: url)
+    request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+    return await withCheckedContinuation { (continuation: CheckedContinuation<Int64?, Never>) in
+        delegate.continuation = continuation
+        session.dataTask(with: request).resume()
     }
 }
 
@@ -552,16 +606,28 @@ private func parseYouTube(_ urlString: String) async throws -> ParsedMedia {
                 audios.append(Stream(url: url, height: 0, bitrate: format["bitrate"] as? Int ?? 0, codecs: type))
             }
         }
-        // avc1 (h264) video muxes cleanly to mp4 on-device;
-        // prefer it, fall back to any mp4 video stream.
-        let avcVideos = videos.filter { $0.codecs.contains("avc1") }
-        let ranked = (avcVideos.isEmpty ? videos : avcVideos).sorted { $0.height > $1.height }
+        // Highest wins: sort by height, avc1 only breaks ties
+        // at the same height. Above 1080p YouTube serves VP9 /
+        // AV1 only, so an avc1-first sort used to cap downloads
+        // at 1080p. VP9 may not save into Photos on some
+        // devices; that path already falls back to the share
+        // sheet instead of failing silently.
+        let ranked = videos.sorted {
+            if $0.height != $1.height { return $0.height > $1.height }
+            return $0.codecs.contains("avc1") && !$1.codecs.contains("avc1")
+        }
         guard let video = ranked.first else {
             lastError = ParseError.message("这个视频没有可下载的格式")
             continue
         }
         let audio = audios.sorted { $0.bitrate > $1.bitrate }.first
         let quality = "\(video.height)p" + (audio == nil ? " · 无声" : " · 含音频")
+        // googlevideo URLs carry clen (content length), so the
+        // download size is exact with no extra request: video
+        // track + audio track.
+        let videoBytes = clenBytes(video.url)
+        let audioBytes = audio.flatMap { clenBytes($0.url) }
+        let totalBytes: Int64? = (videoBytes == nil && audioBytes == nil) ? nil : (videoBytes ?? 0) + (audioBytes ?? 0)
         // The API host answering does not mean the stream host
         // is reachable from this phone: the proxied URL 307s to
         // a companion host, and when that host is unreachable
@@ -580,7 +646,8 @@ private func parseYouTube(_ urlString: String) async throws -> ParsedMedia {
             videoQuality: quality,
             audioURL: audio.map { URL(string: $0.url) } ?? nil,
             images: [],
-            videos: [videoURL]
+            videos: [videoURL],
+            videoSizeBytes: totalBytes
         )
     }
     throw lastError
@@ -613,6 +680,14 @@ private func probeStreamURL(_ url: URL) async -> Bool {
         delegate.continuation = continuation
         session.dataTask(with: url).resume()
     }
+}
+
+/// Content length from a googlevideo URL's clen parameter.
+private func clenBytes(_ urlString: String) -> Int64? {
+    guard let components = URLComponents(string: urlString),
+          let value = components.queryItems?.first(where: { $0.name == "clen" })?.value,
+          let bytes = Int64(value) else { return nil }
+    return bytes
 }
 
 private func extractYouTubeID(_ urlString: String) -> String? {

@@ -187,6 +187,11 @@ struct DownloadRootView: View {
                                 .font(.caption)
                                 .foregroundColor(.gray)
                         }
+                        if let size = parsed.videoSizeBytes {
+                            Text("约 \(formatBytes(size))")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
                     }
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                         ForEach(videoList, id: \.absoluteString) { url in
@@ -329,6 +334,13 @@ struct DownloadRootView: View {
                 }
             }
         }
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let mb = Double(bytes) / 1_000_000
+        if mb >= 1000 { return String(format: "%.2f GB", mb / 1000) }
+        if mb >= 1 { return String(format: "%.1f MB", mb) }
+        return "\(max(bytes / 1000, 1)) KB"
     }
 
     // MARK: - Downloads
