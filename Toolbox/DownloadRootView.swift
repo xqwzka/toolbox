@@ -700,6 +700,8 @@ private struct VideoViewerView: View {
     let onDownload: () -> Void
     let onClose: () -> Void
     @State private var player: AVPlayer?
+    @State private var playError: String?
+    @State private var failureObserver: NSObjectProtocol?
 
     var body: some View {
         ZStack {
@@ -716,7 +718,14 @@ private struct VideoViewerView: View {
                         .foregroundColor(.white)
                 }
                 .padding(16)
-                if let player {
+                if let playError {
+                    Text(playError)
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.8))
+                        .multilineTextAlignment(.center)
+                        .padding(32)
+                    Spacer()
+                } else if let player {
                     VideoPlayer(player: player)
                         .ignoresSafeArea(edges: .horizontal)
                 } else {
@@ -751,9 +760,23 @@ private struct VideoViewerView: View {
         .onAppear {
             let p = AVPlayer(url: url)
             player = p
+            // A failed stream used to sit on a black screen
+            // with no message; surface the failure instead.
+            failureObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemFailedToPlayToEndTime,
+                object: p.currentItem,
+                queue: .main
+            ) { note in
+                let detail = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?.localizedDescription
+                playError = detail ?? "视频加载失败，可能是当前网络打不开这个播放地址"
+            }
             p.play()
         }
         .onDisappear {
+            if let failureObserver {
+                NotificationCenter.default.removeObserver(failureObserver)
+            }
+            failureObserver = nil
             player?.pause()
             player = nil
         }

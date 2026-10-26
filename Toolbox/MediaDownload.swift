@@ -85,7 +85,12 @@ func downloadFileWithProgress(from url: URL, defaultExtension: String = "mp4", o
 
     let delegate = Delegate()
     delegate.onProgress = onProgress
-    let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: .main)
+    // Bound the wait: the default resource timeout lets a
+    // blackholed stream host spin for minutes with no message.
+    // 30s per attempt fails fast enough to retry, then toast.
+    let config = URLSessionConfiguration.default
+    config.timeoutIntervalForRequest = 30
+    let session = URLSession(configuration: config, delegate: delegate, delegateQueue: .main)
     defer { session.finishTasksAndInvalidate() }
     let tempURL = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
         delegate.continuation = continuation

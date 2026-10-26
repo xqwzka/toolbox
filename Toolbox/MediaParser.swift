@@ -221,6 +221,12 @@ private func parseLuotian(shareText: String, platform: DownloadPlatform) async t
     }
     var videos: [String] = []
     var images: [String] = []
+    // 洛天's top-level type tells the truth for Xiaohongshu:
+    // an image note's media_url is a ci.xiaohongshu.com link
+    // with no .jpg suffix, and the old .media fallback sent
+    // every unknown host to video — so image notes parsed to
+    // zero images and one bogus "video" cell.
+    let responseIsImage = (json as? [String: Any])?["type"] as? String == "image"
     // Douyin's CDN links often carry no .mp4/.jpg suffix at all
     // (image hosts serve ~tplv-...image URLs, video hosts serve
     // bare videoplayback paths), so extension alone drops most
@@ -251,6 +257,14 @@ private func parseLuotian(shareText: String, platform: DownloadPlatform) async t
             videos.append(string)
         case .media:
             let host = URL(string: string)?.host?.lowercased() ?? ""
+            // Xiaohongshu image markers: ci.xiaohongshu.com is
+            // image-only, xhscdn image hosts serve imageView2
+            // URLs, and /format/jpg|png|webp has no dot suffix
+            // for the extension check above to catch.
+            if responseIsImage || lower.contains("imageview2") || lower.contains("/format/jpg") || lower.contains("/format/png") || lower.contains("/format/webp") || host.contains("xiaohongshu.com") || host.contains("xhscdn.com") {
+                images.append(string)
+                return
+            }
             let isDouyinCDN = host.contains("douyinpic") || host.contains("tiktokcdn")
             if isDouyinCDN, let first = host.first, first == "p" {
                 images.append(string)
@@ -539,17 +553,57 @@ private func parseYouTube(_ urlString: String) async throws -> ParsedMedia {
         }
         let audio = audios.sorted { $0.bitrate > $1.bitrate }.first
         let quality = "\(video.height)p" + (audio == nil ? " · 无声" : " · 含音频")
+        // The API host answering does not mean the stream host
+        // is reachable from this phone: the proxied URL 307s to
+        // a companion host, and when that host is unreachable
+        // the viewer used to sit on a black screen and the
+        // download used to spin with no message. Probe the
+        // picked stream before claiming success; a dead
+        // companion host moves on to the next instance.
+        guard let videoURL = URL(string: video.url), await probeStreamURL(videoURL) else {
+            lastError = ParseError.message("这个视频的播放地址在当前网络下打不开，换个网络或节点再试")
+            continue
+        }
         return ParsedMedia(
             platform: .youtube,
             source: "Invidious (\(domain))",
-            videoURL: URL(string: video.url),
+            videoURL: videoURL,
             videoQuality: quality,
             audioURL: audio.map { URL(string: $0.url) } ?? nil,
             images: [],
-            videos: URL(string: video.url).map { [$0] } ?? []
+            videos: [videoURL]
         )
     }
     throw lastError
+}
+
+/// Reachability probe: starts a GET and cancels as soon as
+/// response headers arrive, so zero body bytes download.
+/// True only for a 2xx final response — transport failure,
+/// 403, or a hanging host (10s timeout) all read as false.
+private func probeStreamURL(_ url: URL) async -> Bool {
+    final class Delegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        var continuation: CheckedContinuation<Bool, Never>?
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            continuation?.resume(returning: (200...299).contains(code))
+            continuation = nil
+            completionHandler(.cancel)
+        }
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            continuation?.resume(returning: false)
+            continuation = nil
+        }
+    }
+    let delegate = Delegate()
+    let config = URLSessionConfiguration.default
+    config.timeoutIntervalForRequest = 10
+    let session = URLSession(configuration: config, delegate: delegate, delegateQueue: .main)
+    defer { session.finishTasksAndInvalidate() }
+    return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        delegate.continuation = continuation
+        session.dataTask(with: url).resume()
+    }
 }
 
 private func extractYouTubeID(_ urlString: String) -> String? {
