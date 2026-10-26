@@ -56,7 +56,7 @@ func downloadFile(from url: URL, defaultExtension: String = "mp4") async throws 
 /// response at all) surface as URLError so callers can retry
 /// them, while HTTP errors surface as DownloadError.network
 /// (retrying a 403 is pointless).
-func downloadFileWithProgress(from url: URL, defaultExtension: String = "mp4", onProgress: (@escaping (Double) -> Void)? = nil) async throws -> URL {
+func downloadFileWithProgress(from url: URL, defaultExtension: String = "mp4", onProgress: ((Double) -> Void)? = nil) async throws -> URL {
     final class Delegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
         var continuation: CheckedContinuation<URL, Error>?
         var onProgress: ((Double) -> Void)?
