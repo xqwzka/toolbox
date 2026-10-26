@@ -110,7 +110,7 @@ struct DownloadRootView: View {
                     .font(.caption)
                     .foregroundColor(.gray)
             }
-            if let videoURL = parsed.videoURL {
+            if parsed.videoURL != nil {
                 HStack(spacing: 12) {
                     Image(systemName: "play.rectangle")
                         .font(.title2)

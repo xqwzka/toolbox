@@ -97,7 +97,7 @@ func saveImageDataToPhotos(_ data: Data) async throws {
     }
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
         PHPhotoLibrary.shared().performChanges({
-            _ = PHAssetChangeRequest.creationRequestForAssetFromImage(image)
+            _ = PHAssetChangeRequest.creationRequestForAsset(from: image)
         }) { success, error in
             if success {
                 continuation.resume()
