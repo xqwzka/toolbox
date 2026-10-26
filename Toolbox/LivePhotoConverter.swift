@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import AVFoundation
+import CoreMedia
 import ImageIO
 import Photos
 import PhotosUI
@@ -19,10 +20,10 @@ import UniformTypeIdentifiers
 /// the metadata — the same content identifier in the video's
 /// QuickTime metadata track (content-identifier +
 /// still-image-time) and in the JPEG's MakerApple dictionary
-/// (key "17"). The video still-image-time is an NSNumber
-/// (seconds): NSValue(time:) and NSString forms both crashed
-/// on-device, and the metadata groups are appended only when
-/// the metadata input reports itself ready.
+/// (key "17"). The video metadata track is written by appending
+/// metadata sample buffers directly (UTF-8 identifier, big-endian
+/// Float32 still time) — no AVAssetWriterInputMetadataAdaptor,
+/// which crashed on-device in every position it was tried.
 
 // MARK: - Crash-step diagnostics
 //
@@ -70,6 +71,88 @@ func liveDebugLastLine() -> String {
 /// callback and the pump completion run on the writer queue).
 private final class MetadataAppendState: @unchecked Sendable {
     var appended = false
+}
+
+// MARK: - Metadata samples (adaptor-free)
+
+/// Metadata format description for the Live Photo video track:
+/// two QuickTime keys, UTF-8 string identifier and big-endian
+/// Float32 still time. Returns nil if the description cannot be
+/// built (the caller then fails the conversion cleanly).
+private func makeLivePhotoMetadataFormatDescription() -> CMFormatDescription? {
+    let specs: [[CFString: Any]] = [
+        [kCMMetadataFormatDescriptionMetadataSpecificationKey_Identifier: "com.apple.quicktime.content-identifier" as CFString,
+         kCMMetadataFormatDescriptionMetadataSpecificationKey_DataType: kCMMetadataBaseDataType_UTF8],
+        [kCMMetadataFormatDescriptionMetadataSpecificationKey_Identifier: "com.apple.quicktime.still-image-time" as CFString,
+         kCMMetadataFormatDescriptionMetadataSpecificationKey_DataType: kCMMetadataBaseDataType_BigEndianFloat32],
+    ]
+    var formatDescription: CMFormatDescription?
+    let status = CMMetadataFormatDescriptionCreateWithMetadataSpecifications(
+        allocator: kCFAllocatorDefault,
+        metadataSpecifications: specs as CFArray,
+        formatDescriptionOut: &formatDescription
+    )
+    guard status == noErr else { return nil }
+    return formatDescription
+}
+
+/// One metadata sample: the value bytes at the given time.
+/// Returns nil if the sample cannot be built.
+private func makeMetadataSample(formatDescription: CMFormatDescription, valueData: Data, time: CMTime) -> CMSampleBuffer? {
+    var blockBuffer: CMBlockBuffer?
+    var status = CMBlockBufferCreateWithMemoryBlock(
+        allocator: kCFAllocatorDefault,
+        memoryBlock: nil,
+        blockLength: valueData.count,
+        blockAllocator: kCFAllocatorDefault,
+        customBlockSource: nil,
+        offsetToData: 0,
+        dataLength: valueData.count,
+        flags: [],
+        blockBufferOut: &blockBuffer
+    )
+    guard status == noErr, let blockBuffer else { return nil }
+    let byteCount = valueData.count
+    var copyStatus: OSStatus = -1
+    valueData.withUnsafeBytes { ptr in
+        if let base = ptr.baseAddress {
+            copyStatus = CMBlockBufferReplaceDataBytes(
+                with: base,
+                blockBuffer: blockBuffer,
+                offsetIntoDestination: 0,
+                dataLength: byteCount
+            )
+        }
+    }
+    guard copyStatus == noErr else { return nil }
+    var timing = CMSampleTimingInfo(
+        duration: CMTime(seconds: 0.1, preferredTimescale: 600),
+        presentationTimeStamp: time,
+        decodeTimeStamp: .invalid
+    )
+    var sampleSize = byteCount
+    var sampleBuffer: CMSampleBuffer?
+    status = CMSampleBufferCreate(
+        allocator: kCFAllocatorDefault,
+        dataBuffer: blockBuffer,
+        dataReady: true,
+        makeDataReadyCallback: nil,
+        refcon: nil,
+        formatDescription: formatDescription,
+        sampleCount: 1,
+        sampleTimingEntryCount: 1,
+        sampleTimingArray: &timing,
+        sampleSizeEntryCount: 1,
+        sampleSizeArray: &sampleSize,
+        sampleBufferOut: &sampleBuffer
+    )
+    guard status == noErr else { return nil }
+    return sampleBuffer
+}
+
+private func float32BEData(_ value: Float) -> Data {
+    var bits = value.bitPattern.bigEndian
+    return Data(bytes: &bits, count: 4)
 }
 
 // MARK: - Crash capture
@@ -238,15 +321,12 @@ private func embedContentIdentifier(jpegData: Data, identifier: String) -> Data 
 /// Re-mux the clip with a QuickTime metadata track:
 /// content-identifier at time zero, still-image-time at the still
 /// frame. Video and audio tracks pass through untouched (nil
-/// output settings). still-image-time is a 32-bit float NSNumber
-/// (seconds, the QuickTime still-image-time storage form).
-/// Metadata groups are appended only when the metadata input
-/// reports itself ready, and the callback is registered only
-/// after the session starts: registering it before startSession
-/// let it fire before the session existed and crashed on-device
-/// (step marker "加写入输入", 2026-10-26). The adaptor itself is
-/// created inside the ready callback: creating it during setup
-/// crashed on-device (step marker "建元数据适配器", 2026-10-26).
+/// output settings). The metadata track is written by appending
+/// metadata sample buffers directly to the metadata input —
+/// no AVAssetWriterInputMetadataAdaptor anywhere: the adaptor
+/// crashed on-device in every position it was tried (setup,
+/// ready callback, 2026-10-26). still-image-time is stored as
+/// big-endian Float32 seconds, the identifier as UTF-8.
 private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: String) async throws -> URL {
     liveDebugMark("读轨道")
     let asset = AVURLAsset(url: videoURL)
@@ -272,10 +352,6 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
     liveDebugMark("建元数据输入")
     let metadataInput = AVAssetWriterInput(mediaType: .metadata, outputSettings: nil)
     metadataInput.expectsMediaDataInRealTime = false
-    // The metadata adaptor is created in the ready callback
-    // below, after the session starts: creating it here
-    // crashed on-device (step marker "建元数据适配器",
-    // 2026-10-26 19:56).
     liveDebugMark("加视频输入")
     guard writer.canAdd(videoInput) else {
         throw LivePhotoError.writerFailed
@@ -302,28 +378,26 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
         reader.add(output)
         audioOutput = output
     }
-    liveDebugMark("建元数据组")
-    // Timed metadata groups, created upfront; appended in the
-    // metadata input's ready callback, registered only after
-    // the session starts (see below).
-    func metadataItem(key: String, value: any NSCopying & NSObjectProtocol) -> AVMutableMetadataItem {
-        let item = AVMutableMetadataItem()
-        item.keySpace = .quickTimeMetadata
-        item.key = key as NSString
-        item.value = value
-        return item
+    // Metadata samples, built upfront (pure object construction,
+    // no writer interaction): the format description declares the
+    // two QuickTime keys, each sample carries one item's value
+    // bytes at the item's time. No adaptor anywhere (see above).
+    liveDebugMark("建元数据格式")
+    guard let formatDescription = makeLivePhotoMetadataFormatDescription() else {
+        throw LivePhotoError.writerFailed
     }
-    let identifierGroup = AVTimedMetadataGroup(
-        items: [metadataItem(key: "com.apple.quicktime.content-identifier", value: identifier as NSString)],
-        timeRange: CMTimeRange(start: .zero, duration: CMTime(seconds: 0.1, preferredTimescale: 600))
-    )
-    // still-image-time as a 32-bit float number (the QuickTime
-    // storage form); earlier forms (NSValue(time:), NSString,
-    // 64-bit NSNumber) were all in builds that crashed on-device.
-    let stillGroup = AVTimedMetadataGroup(
-        items: [metadataItem(key: "com.apple.quicktime.still-image-time", value: NSNumber(value: Float(stillTime.seconds)))],
-        timeRange: CMTimeRange(start: stillTime, duration: CMTime(seconds: 0.1, preferredTimescale: 600))
-    )
+    liveDebugMark("建元数据采样")
+    guard let identifierSample = makeMetadataSample(
+        formatDescription: formatDescription,
+        valueData: Data(identifier.utf8),
+        time: .zero
+    ), let stillSample = makeMetadataSample(
+        formatDescription: formatDescription,
+        valueData: float32BEData(Float(stillTime.seconds)),
+        time: stillTime
+    ) else {
+        throw LivePhotoError.writerFailed
+    }
     let writingQueue = DispatchQueue(label: "livephoto.writer")
     let metadataState = MetadataAppendState()
     liveDebugMark("开始读取")
@@ -336,19 +410,15 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
     guard writer.status == .writing else {
         throw writer.error ?? LivePhotoError.writerFailed
     }
-    // Register the metadata callback only now that the session
-    // is running: registering it before startSession let it fire
-    // before the session existed, and appending then crashed
-    // on-device (step marker "加写入输入", 2026-10-26 19:43).
+    // Append the metadata samples only now that the session is
+    // running, in the metadata input's ready callback.
     liveDebugMark("注册元数据回调")
     metadataInput.requestMediaDataWhenReady(on: writingQueue) {
         guard writer.status == .writing, !metadataState.appended, metadataInput.isReadyForMoreMediaData else { return }
         metadataState.appended = true
-        liveDebugMark("建元数据适配器")
-        let metadataAdaptor = AVAssetWriterInputMetadataAdaptor(assetWriterInput: metadataInput)
-        liveDebugMark("追加元数据组")
-        _ = metadataAdaptor.append(identifierGroup)
-        _ = metadataAdaptor.append(stillGroup)
+        liveDebugMark("追加元数据采样")
+        metadataInput.append(identifierSample)
+        metadataInput.append(stillSample)
         metadataInput.markAsFinished()
     }
     liveDebugMark("泵送视频")
