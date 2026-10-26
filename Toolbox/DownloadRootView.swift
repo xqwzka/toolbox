@@ -35,12 +35,22 @@ struct DownloadRootView: View {
     @State private var showPhotoPicker = false
     @State private var showVideoFilePicker = false
     @State private var player: AVPlayer?
+    @State private var viewingVideo: URL?
+    @State private var viewingAudio: URL?
+    @State private var viewingQuality: String?
     @State private var previewObserver: Any?
     @State private var sharingURL: URL?
     @State private var showingShare = false
     @State private var toastVisible = false
     @State private var toastText = ""
     @State private var toastID = 0
+
+    /// Square thumbnail side: explicit frames, so a portrait
+    /// image can never blow up a grid cell and overlap the
+    /// sections below (the old aspectRatio(1, fill) chain did).
+    private var gridCell: CGFloat {
+        (UIScreen.main.bounds.width - 32 - 16) / 3
+    }
 
     var body: some View {
         NavigationStack {
@@ -55,7 +65,12 @@ struct DownloadRootView: View {
                         cobaltSection
                         footerNote
                     }
-                    .padding(16)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 16)
+                    // Bottom clearance: the floating switch
+                    // button sits over the bottom ~175pt, so the
+                    // convert button must scroll above it.
+                    .padding(.bottom, 180)
                 }
                 .onAppear { refreshLiveDebug() }
                 if toastVisible {
@@ -76,6 +91,30 @@ struct DownloadRootView: View {
                     handlePickedVideo(url)
                 }
             )
+            .fullScreenCover(isPresented: Binding(
+                get: { viewingVideo != nil },
+                set: { if !$0 { viewingVideo = nil; viewingAudio = nil; viewingQuality = nil } }
+            )) {
+                if let url = viewingVideo {
+                    VideoViewerView(
+                        url: url,
+                        quality: viewingQuality,
+                        onDownload: {
+                            let video = url
+                            let audio = viewingAudio
+                            viewingVideo = nil
+                            viewingAudio = nil
+                            viewingQuality = nil
+                            Task { await downloadVideoURL(video, audioURL: audio) }
+                        },
+                        onClose: {
+                            viewingVideo = nil
+                            viewingAudio = nil
+                            viewingQuality = nil
+                        }
+                    )
+                }
+            }
         }
     }
 
@@ -137,31 +176,39 @@ struct DownloadRootView: View {
                     .font(.caption)
                     .foregroundColor(.gray)
             }
-            if parsed.videoURL != nil {
-                HStack(spacing: 12) {
-                    Image(systemName: "play.rectangle")
-                        .font(.title2)
-                        .foregroundColor(.blue)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("视频")
+            let videoList = parsed.videos.isEmpty ? parsed.videoURL.map { [$0] } ?? [] : parsed.videos
+            if !videoList.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("视频 \(videoList.count) 个 · 点开预览")
                             .font(.headline)
-                        Text(parsed.videoQuality ?? "视频文件")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                    }
-                    Spacer()
-                    if downloadingVideo {
-                        ProgressView()
-                    } else {
-                        Button("下载") {
-                            Task { await downloadVideo(parsed) }
+                        Spacer()
+                        if let quality = parsed.videoQuality {
+                            Text(quality)
+                                .font(.caption)
+                                .foregroundColor(.gray)
                         }
-                        .buttonStyle(.borderedProminent)
+                    }
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                        ForEach(videoList, id: \.absoluteString) { url in
+                            Button {
+                                viewingVideo = url
+                                viewingAudio = url == parsed.videoURL ? parsed.audioURL : nil
+                                viewingQuality = url == parsed.videoURL ? parsed.videoQuality : nil
+                            } label: {
+                                ZStack(alignment: .bottomTrailing) {
+                                    VideoThumbView(url: url, size: gridCell)
+                                    Image(systemName: "play.circle.fill")
+                                        .font(.title3)
+                                        .foregroundColor(.white)
+                                        .shadow(radius: 2)
+                                        .padding(6)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
-                .padding(12)
-                .background(Color.white)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
             }
             if !parsed.livePhotos.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
@@ -235,8 +282,7 @@ struct DownloadRootView: View {
                                             Color.gray.opacity(0.2)
                                         }
                                     }
-                                    .frame(maxWidth: .infinity)
-                                    .aspectRatio(1, contentMode: .fill)
+                                    .frame(width: gridCell, height: gridCell)
                                     .clipShape(RoundedRectangle(cornerRadius: 10))
                                     if downloadingImages.contains(url.absoluteString) {
                                         ProgressView()
@@ -259,14 +305,13 @@ struct DownloadRootView: View {
 
     // MARK: - Downloads
 
-    private func downloadVideo(_ parsed: ParsedMedia) async {
-        guard let videoURL = parsed.videoURL else { return }
+    private func downloadVideoURL(_ videoURL: URL, audioURL: URL?) async {
         downloadingVideo = true
         defer { downloadingVideo = false }
         do {
             let videoFile = try await downloadFile(from: videoURL)
             let finalFile: URL
-            if let audioURL = parsed.audioURL {
+            if let audioURL {
                 let audioFile = try await downloadFile(from: audioURL, defaultExtension: "m4a")
                 do {
                     finalFile = try await muxVideo(videoURL: videoFile, audioURL: audioFile)
@@ -566,5 +611,103 @@ private struct DownloadToastView: View {
             .background(Color.black.opacity(0.85))
             .clipShape(Capsule())
             .shadow(color: Color.black.opacity(0.2), radius: 8, y: 2)
+    }
+}
+
+/// One video thumbnail: a frame grabbed at 0.5s, or a play icon
+/// tile when the frame cannot be read (HLS, dead link). The
+/// grab runs off the main thread; the tile stays an icon until
+/// it lands. Explicit square frame — same overlap fix as the
+/// image grid.
+private struct VideoThumbView: View {
+    let url: URL
+    let size: CGFloat
+    @State private var thumb: UIImage?
+
+    var body: some View {
+        ZStack {
+            if let thumb {
+                Image(uiImage: thumb)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Color.gray.opacity(0.2)
+                Image(systemName: "play.rectangle")
+                    .font(.title2)
+                    .foregroundColor(.gray)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .task {
+            let image = await Task.detached { () -> UIImage? in
+                let asset = AVURLAsset(url: url)
+                let generator = AVAssetImageGenerator(asset: asset)
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: 400, height: 400)
+                guard let cg = try? generator.copyCGImage(
+                    at: CMTime(seconds: 0.5, preferredTimescale: 600),
+                    actualTime: nil
+                ) else { return nil }
+                return UIImage(cgImage: cg)
+            }.value
+            if !Task.isCancelled {
+                thumb = image
+            }
+        }
+    }
+}
+
+/// Full-screen video viewing window: tap a thumbnail to watch,
+/// download from here. The player is created on appear and torn
+/// down on disappear so nothing keeps playing behind the sheet.
+private struct VideoViewerView: View {
+    let url: URL
+    let quality: String?
+    let onDownload: () -> Void
+    let onClose: () -> Void
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 0) {
+                HStack {
+                    if let quality {
+                        Text(quality)
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                    Spacer()
+                    Button("关闭", action: onClose)
+                        .foregroundColor(.white)
+                }
+                .padding(16)
+                if let player {
+                    VideoPlayer(player: player)
+                        .ignoresSafeArea(edges: .horizontal)
+                } else {
+                    Spacer()
+                }
+                HStack {
+                    Spacer()
+                    Button("下载") {
+                        onDownload()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Spacer()
+                }
+                .padding(16)
+            }
+        }
+        .onAppear {
+            let p = AVPlayer(url: url)
+            player = p
+            p.play()
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+        }
     }
 }

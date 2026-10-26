@@ -34,6 +34,10 @@ struct ParsedMedia {
     let audioURL: URL?
     let images: [URL]
     var livePhotos: [LivePhotoItem] = []
+    /// Every video the backend returned. videoURL is videos[0];
+    /// the UI shows all of them as thumbnails instead of only
+    /// the first one, so multi-video posts stop collapsing.
+    var videos: [URL] = []
 }
 
 enum ParseError: Error, LocalizedError {
@@ -308,7 +312,8 @@ private func parseLuotian(shareText: String, platform: DownloadPlatform) async t
         videoQuality: nil,
         audioURL: nil,
         images: images.compactMap(URL.init),
-        livePhotos: livePhotos
+        livePhotos: livePhotos,
+        videos: videos.compactMap(URL.init)
     )
 }
 
@@ -362,7 +367,8 @@ private func parseInstagram(_ urlString: String) async throws -> ParsedMedia {
         videoURL: videos.first.flatMap(URL.init),
         videoQuality: nil,
         audioURL: nil,
-        images: images.compactMap(URL.init)
+        images: images.compactMap(URL.init),
+        videos: videos.compactMap(URL.init)
     )
 }
 
@@ -432,7 +438,7 @@ private func parseX(_ urlString: String) async throws -> ParsedMedia {
             }
         }
         if let found = bestURL {
-            return ParsedMedia(platform: .twitter, source: host, videoURL: URL(string: found), videoQuality: nil, audioURL: nil, images: [])
+            return ParsedMedia(platform: .twitter, source: host, videoURL: URL(string: found), videoQuality: nil, audioURL: nil, images: [], videos: URL(string: found).map { [$0] } ?? [])
         }
         // Fallback: any direct video.twimg.com mp4 link. The
         // re-serialized JSON escapes slashes (https:\/\/...),
@@ -442,7 +448,7 @@ private func parseX(_ urlString: String) async throws -> ParsedMedia {
            !rawText.isEmpty {
             let text = rawText.replacingOccurrences(of: "\\/", with: "/")
             if let match = text.range(of: "https://video\\.twimg\\.com/[^\"'\\s]+\\.mp4", options: .regularExpression) {
-                return ParsedMedia(platform: .twitter, source: host, videoURL: URL(string: String(text[match])), videoQuality: nil, audioURL: nil, images: [])
+                return ParsedMedia(platform: .twitter, source: host, videoURL: URL(string: String(text[match])), videoQuality: nil, audioURL: nil, images: [], videos: URL(string: String(text[match])).map { [$0] } ?? [])
             }
         }
         lastError = ParseError.message("这个帖子没有可下载的视频")
@@ -507,7 +513,8 @@ private func parseYouTube(_ urlString: String) async throws -> ParsedMedia {
             videoURL: URL(string: video.url),
             videoQuality: quality,
             audioURL: audio.map { URL(string: $0.url) } ?? nil,
-            images: []
+            images: [],
+            videos: URL(string: video.url).map { [$0] } ?? []
         )
     }
     throw lastError
@@ -578,7 +585,7 @@ private func parseCobalt(instance: String, urlString: String, platform: Download
         if lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".png") || lower.contains(".webp") {
             return ParsedMedia(platform: platform, source: "cobalt", videoURL: nil, videoQuality: nil, audioURL: nil, images: [url])
         }
-        return ParsedMedia(platform: platform, source: "cobalt", videoURL: url, videoQuality: "最高画质", audioURL: nil, images: [])
+        return ParsedMedia(platform: platform, source: "cobalt", videoURL: url, videoQuality: "最高画质", audioURL: nil, images: [], videos: [url])
     case "picker":
         var videos: [String] = []
         var images: [String] = []
@@ -597,7 +604,7 @@ private func parseCobalt(instance: String, urlString: String, platform: Download
         guard !videos.isEmpty || !images.isEmpty else {
             throw ParseError.message("cobalt 没有返回可下载内容")
         }
-        return ParsedMedia(platform: platform, source: "cobalt", videoURL: videos.first.flatMap(URL.init), videoQuality: "最高画质", audioURL: nil, images: images.compactMap(URL.init))
+        return ParsedMedia(platform: platform, source: "cobalt", videoURL: videos.first.flatMap(URL.init), videoQuality: "最高画质", audioURL: nil, images: images.compactMap(URL.init), videos: videos.compactMap(URL.init))
     case "error":
         let error = dict["error"] as? [String: Any]
         throw ParseError.message(error?["text"] as? String ?? error?["code"] as? String ?? "cobalt 解析失败")
