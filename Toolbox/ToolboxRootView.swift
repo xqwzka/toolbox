@@ -9,6 +9,7 @@ enum ToolboxTab: String, CaseIterable {
     case ledger = "记账"
     case cardcodes = "卡密"
     case web = "网页"
+    case download = "下载"
 }
 
 struct ToolboxRootView: View {
@@ -25,6 +26,8 @@ struct ToolboxRootView: View {
                     CardCodesRootView()
                 case .web:
                     WebRootView()
+                case .download:
+                    DownloadRootView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -89,6 +92,15 @@ struct SwitcherView: View {
                         isCurrent: current == .web
                     ) {
                         onSelect(.web)
+                    }
+                    SwitcherRow(
+                        icon: "arrow.down.circle",
+                        color: .purple,
+                        title: "下载",
+                        subtitle: "视频解析 · 7 个平台",
+                        isCurrent: current == .download
+                    ) {
+                        onSelect(.download)
                     }
                 }
                 .padding(.horizontal, 16)

@@ -13,6 +13,7 @@ targets:
       properties:
         CFBundleDisplayName: 工具箱
         CFBundleVersion: "1"
+        NSPhotoLibraryAddUsageDescription: 下载的视频和图片需要保存到相册
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UILaunchStoryboardName: LaunchScreen
         CFBundleDocumentTypes:
