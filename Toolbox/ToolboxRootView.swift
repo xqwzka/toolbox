@@ -15,6 +15,8 @@ enum ToolboxTab: String, CaseIterable {
 struct ToolboxRootView: View {
     @State private var tab: ToolboxTab = .ledger
     @State private var showingSwitcher = false
+    @State private var floatPosition = CGSize.zero
+    @GestureState private var dragTranslation = CGSize.zero
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -40,6 +42,24 @@ struct ToolboxRootView: View {
                     .frame(width: 56, height: 56)
                     .liquidGlassCircle()
             }
+            // Draggable: dragging moves it, a plain tap still
+            // opens the switcher (DragGesture's 10pt threshold
+            // lets taps through). Clamped on release so it
+            // cannot be dragged off screen.
+            .offset(CGSize(width: floatPosition.width + dragTranslation.width,
+                           height: floatPosition.height + dragTranslation.height))
+            .gesture(
+                DragGesture()
+                    .updating($dragTranslation) { value, state, _ in
+                        state = value.translation
+                    }
+                    .onEnded { value in
+                        floatPosition = CGSize(
+                            width: min(20, max(-300, floatPosition.width + value.translation.width)),
+                            height: min(20, max(-500, floatPosition.height + value.translation.height))
+                        )
+                    }
+            )
             .padding(.trailing, 20)
             // Clears the ledger tab's own bottom bar; on the other
             // tabs it simply floats a little higher.

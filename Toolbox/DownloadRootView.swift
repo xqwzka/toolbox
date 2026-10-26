@@ -359,6 +359,7 @@ struct DownloadRootView: View {
                             Task { await convertLive() }
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(liveVideoDuration <= 0)
                     }
                 }
                 .padding(12)

@@ -12,10 +12,14 @@ import UniformTypeIdentifiers
 /// PHAssetCreationRequest. The still is the middle frame of the
 /// chosen segment; the segment is capped at 3 seconds (the Live
 /// Photo video length). The trimmed clip is re-encoded to H.264
-/// .mov, then re-muxed with a QuickTime metadata track carrying
-/// the content identifier and the still-image-time, so Photos
-/// plays it seamlessly on long-press instead of treating it as
-/// a separate photo plus video.
+/// .mov and saved directly: the single-request pairing is what
+/// makes Photos treat the two as one Live Photo. An earlier
+/// build re-muxed the clip with a QuickTime metadata track
+/// (content-identifier + still-image-time) for seamless
+/// playback, but that step crashed on-device, so it was removed;
+/// if long-press playback jumps from the still to the video
+/// start instead of playing seamlessly, that step is the thing
+/// to revisit.
 
 enum LivePhotoError: Error, LocalizedError {
     case noVideoTrack
@@ -50,13 +54,7 @@ func convertVideoToLivePhoto(sourceURL: URL, start: Double, duration: Double) as
     let safeDuration = min(duration, 3.0, max(0.1, sourceDuration - safeStart))
     let trimmed = try await trimVideo(sourceURL: sourceURL, start: safeStart, duration: safeDuration)
     let stillData = try extractStillFrame(videoURL: trimmed, at: safeDuration / 2)
-    let identifier = UUID().uuidString
-    let finalVideo = try await addLivePhotoMetadata(
-        videoURL: trimmed,
-        stillTime: CMTime(seconds: safeDuration / 2, preferredTimescale: 600),
-        identifier: identifier
-    )
-    try await saveLivePhoto(photoData: stillData, videoURL: finalVideo)
+    try await saveLivePhoto(photoData: stillData, videoURL: trimmed)
 }
 
 /// Cut a segment and normalize it to an H.264 .mov (Live Photos
@@ -101,121 +99,6 @@ private func extractStillFrame(videoURL: URL, at seconds: Double) throws -> Data
         throw LivePhotoError.noFrame
     }
     return data
-}
-
-/// Re-mux the trimmed clip with a QuickTime metadata track:
-/// content-identifier at time zero, still-image-time at the still
-/// frame. Video and audio tracks pass through untouched (nil
-/// output settings). Metadata is best-effort: even if the track
-/// is dropped, the single-request save below still pairs the
-/// photo and video into one asset.
-private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: String) async throws -> URL {
-    let asset = AVURLAsset(url: videoURL)
-    guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
-        throw LivePhotoError.noVideoTrack
-    }
-    let audioTrack = try await asset.loadTracks(withMediaType: .audio).first
-    let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
-    guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .mov) else {
-        throw LivePhotoError.writerFailed
-    }
-    let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil)
-    videoInput.expectsMediaDataInRealTime = false
-    var audioInput: AVAssetWriterInput?
-    if audioTrack != nil {
-        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
-        input.expectsMediaDataInRealTime = false
-        audioInput = input
-    }
-    let metadataInput = AVAssetWriterInput(mediaType: .metadata, outputSettings: nil)
-    metadataInput.expectsMediaDataInRealTime = false
-    let metadataAdaptor = AVAssetWriterInputMetadataAdaptor(assetWriterInput: metadataInput)
-    guard writer.canAdd(videoInput) else {
-        throw LivePhotoError.writerFailed
-    }
-    writer.add(videoInput)
-    if let audioInput, writer.canAdd(audioInput) {
-        writer.add(audioInput)
-    }
-    guard writer.canAdd(metadataInput) else {
-        throw LivePhotoError.writerFailed
-    }
-    writer.add(metadataInput)
-    guard let reader = try? AVAssetReader(asset: asset) else {
-        throw LivePhotoError.writerFailed
-    }
-    let videoOutput = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
-    reader.add(videoOutput)
-    var audioOutput: AVAssetReaderTrackOutput?
-    if let audioTrack {
-        let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: nil)
-        reader.add(output)
-        audioOutput = output
-    }
-    guard reader.startReading() else {
-        throw LivePhotoError.writerFailed
-    }
-    writer.startWriting()
-    writer.startSession(atSourceTime: .zero)
-    func metadataItem(key: String, value: (NSCopying & NSObjectProtocol)) -> AVMutableMetadataItem {
-        let item = AVMutableMetadataItem()
-        item.keySpace = .quickTimeMetadata
-        item.key = key as NSString
-        item.value = value
-        return item
-    }
-    let identifierGroup = AVTimedMetadataGroup(
-        items: [metadataItem(key: "com.apple.quicktime.content-identifier", value: identifier as NSString)],
-        timeRange: CMTimeRange(start: .zero, duration: CMTime(seconds: 0.1, preferredTimescale: 600))
-    )
-    let stillGroup = AVTimedMetadataGroup(
-        items: [metadataItem(key: "com.apple.quicktime.still-image-time", value: NSValue(time: stillTime))],
-        timeRange: CMTimeRange(start: stillTime, duration: CMTime(seconds: 0.1, preferredTimescale: 600))
-    )
-    _ = metadataAdaptor.append(identifierGroup)
-    _ = metadataAdaptor.append(stillGroup)
-    let writingQueue = DispatchQueue(label: "livephoto.writer")
-    return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
-        let group = DispatchGroup()
-        group.enter()
-        videoInput.requestMediaDataWhenReady(on: writingQueue) {
-            while videoInput.isReadyForMoreMediaData {
-                guard let buffer = videoOutput.copyNextSampleBuffer() else {
-                    videoInput.markAsFinished()
-                    group.leave()
-                    break
-                }
-                videoInput.append(buffer)
-            }
-        }
-        if let audioInput, let audioOutput {
-            group.enter()
-            audioInput.requestMediaDataWhenReady(on: writingQueue) {
-                while audioInput.isReadyForMoreMediaData {
-                    guard let buffer = audioOutput.copyNextSampleBuffer() else {
-                        audioInput.markAsFinished()
-                        group.leave()
-                        break
-                    }
-                    audioInput.append(buffer)
-                }
-            }
-        }
-        group.notify(queue: writingQueue) {
-            if reader.status == .failed {
-                continuation.resume(throwing: reader.error ?? LivePhotoError.writerFailed)
-                return
-            }
-            metadataInput.markAsFinished()
-            writer.finishWriting {
-                if writer.status == .completed {
-                    continuation.resume(returning: outputURL)
-                } else {
-                    continuation.resume(throwing: writer.error ?? LivePhotoError.writerFailed)
-                }
-            }
-        }
-    }
 }
 
 /// The pairing itself: photo and video in ONE creation request,

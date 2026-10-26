@@ -87,6 +87,14 @@ private func fetchJSON(_ request: URLRequest) async throws -> Any {
         throw ParseError.network
     }
     guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+        // Backends answer non-200 with a JSON error body (e.g.
+        // socialdownloader 422 for rate-limited or private
+        // posts). Surface that message instead of collapsing
+        // every non-200 into a generic network error.
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let message = json["error"] as? String, !message.isEmpty {
+            throw ParseError.message(message)
+        }
         throw ParseError.network
     }
     guard let json = try? JSONSerialization.jsonObject(with: data) else {
@@ -95,11 +103,14 @@ private func fetchJSON(_ request: URLRequest) async throws -> Any {
     return json
 }
 
-private func postJSON(url: String, body: [String: Any]) -> URLRequest {
+private func postJSON(url: String, body: [String: Any], userAgent: String? = nil) -> URLRequest {
     var request = URLRequest(url: URL(string: url)!)
     request.httpMethod = "POST"
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
+    if let userAgent {
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+    }
     request.httpBody = try? JSONSerialization.data(withJSONObject: body)
     return request
 }
@@ -283,7 +294,10 @@ private func parseLuotian(shareText: String, platform: DownloadPlatform) async t
 /// and carousels only; private / age- / region-restricted posts
 /// need a login and come back success=false.
 private func parseInstagram(_ urlString: String) async throws -> ParsedMedia {
-    let json = try await fetchJSON(postJSON(url: "https://www.socialdownloader.space/api/download", body: ["url": urlString]))
+    // Browser UA: the no-UA app request was never verified
+    // against a real post on-device; the browser test that
+    // verified this endpoint used a browser UA.
+    let json = try await fetchJSON(postJSON(url: "https://www.socialdownloader.space/api/download", body: ["url": urlString], userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"))
     if let dict = json as? [String: Any], dict["success"] as? Bool == false {
         throw ParseError.message(dict["error"] as? String ?? "解析失败")
     }
@@ -346,9 +360,10 @@ private func parseX(_ urlString: String) async throws -> ParsedMedia {
         var request = URLRequest(url: URL(string: "https://\(host)/\(user)/status/\(id)")!)
         request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
         guard let json = try? await fetchJSON(request) else { continue }
-        // Best: video_info variants, highest bitrate mp4.
+        // Best: highest bitrate mp4, across both services' shapes.
         var bestURL: String?
         var bestBitrate = -1
+        // Legacy shape: video_info variants.
         for dict in allDicts(in: json) {
             guard let variants = dict["video_info"] as? [String: Any],
                   let list = variants["variants"] as? [[String: Any]] else { continue }
@@ -362,14 +377,47 @@ private func parseX(_ urlString: String) async throws -> ParsedMedia {
                 }
             }
         }
+        // Current fxTwitter shape: media items carry formats[]
+        // and variants[] directly, with no video_info wrapper.
+        // (This was the miss: the old code only knew video_info,
+        // so real fxTwitter replies fell through to "no video".)
+        for dict in allDicts(in: json) {
+            if let formats = dict["formats"] as? [[String: Any]] {
+                for format in formats {
+                    guard let formatURL = format["url"] as? String,
+                          formatURL.lowercased().contains(".mp4") else { continue }
+                    let bitrate = format["bitrate"] as? Int ?? 0
+                    if bitrate > bestBitrate {
+                        bestBitrate = bitrate
+                        bestURL = formatURL
+                    }
+                }
+            }
+            if let variants = dict["variants"] as? [[String: Any]] {
+                for variant in variants {
+                    guard let variantURL = variant["url"] as? String,
+                          variantURL.lowercased().contains(".mp4") else { continue }
+                    let bitrate = variant["bitrate"] as? Int ?? 0
+                    if bitrate > bestBitrate {
+                        bestBitrate = bitrate
+                        bestURL = variantURL
+                    }
+                }
+            }
+        }
         if let found = bestURL {
             return ParsedMedia(platform: .twitter, source: host, videoURL: URL(string: found), videoQuality: nil, audioURL: nil, images: [])
         }
-        // Fallback: any direct video.twimg.com mp4 link.
+        // Fallback: any direct video.twimg.com mp4 link. The
+        // re-serialized JSON escapes slashes (https:\/\/...),
+        // so unescape before matching, or this never matches.
         if let dict = json as? [String: Any],
-           let text = String(data: try JSONSerialization.data(withJSONObject: dict), encoding: .utf8),
-           let match = text.range(of: "https://video\\.twimg\\.com/[^\"'\\s]+\\.mp4", options: .regularExpression) {
-            return ParsedMedia(platform: .twitter, source: host, videoURL: URL(string: String(text[match])), videoQuality: nil, audioURL: nil, images: [])
+           let rawText = String(data: (try? JSONSerialization.data(withJSONObject: dict)) ?? Data(), encoding: .utf8),
+           !rawText.isEmpty {
+            let text = rawText.replacingOccurrences(of: "\\/", with: "/")
+            if let match = text.range(of: "https://video\\.twimg\\.com/[^\"'\\s]+\\.mp4", options: .regularExpression) {
+                return ParsedMedia(platform: .twitter, source: host, videoURL: URL(string: String(text[match])), videoQuality: nil, audioURL: nil, images: [])
+            }
         }
         lastError = ParseError.message("这个帖子没有可下载的视频")
     }
