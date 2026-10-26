@@ -86,7 +86,7 @@ func proxySelectedNodeIDs(_ group: ProxyStrategy, in config: ConfigData) -> [Str
     if group.autoAllNodes {
         let regions = proxyRegionKeys(group.regions)
         return config.nodeLinks.filter { node in
-            let parsed = parseProxyNodeLink(node.url, node.name)
+            let parsed = parseProxyNodeLink(node.url, fallbackName: node.name)
             return parsed.ok && !regions.isEmpty && proxyMatchesRegions(parsed.name, keys: regions)
         }.map { $0.id }
     }
@@ -101,7 +101,7 @@ func proxyResolveStrategy(_ group: ProxyStrategy, in config: ConfigData) -> Prox
     var matchedMembers: [String] = []
     let policyNames = ["DIRECT", "REJECT"] + config.strategies.map { $0.name }
     let parsedNodes = config.nodeLinks.compactMap { node -> (id: String, parsed: ParsedProxyNode)? in
-        let parsed = parseProxyNodeLink(node.url, node.name)
+        let parsed = parseProxyNodeLink(node.url, fallbackName: node.name)
         return parsed.ok ? (node.id, parsed) : nil
     }
     let subscriptionIDs = proxySelectedSubscriptionIDs(group, in: config)
@@ -158,7 +158,7 @@ func proxyGenerateClash(_ config: ConfigData) -> ProxyGeneratedOutput {
     var warnings: [String] = []
     var parsedNodes: [ParsedProxyNode] = []
     for link in config.nodeLinks {
-        let parsed = parseProxyNodeLink(link.url, link.name)
+        let parsed = parseProxyNodeLink(link.url, fallbackName: link.name)
         if parsed.ok {
             parsedNodes.append(parsed)
         } else {
@@ -396,7 +396,7 @@ func proxyGenerateShadowrocket(_ config: ConfigData) -> ProxyGeneratedOutput {
         "[Proxy]",
     ]
     let parsedNodes = config.nodeLinks.compactMap { link -> ParsedProxyNode? in
-        let parsed = parseProxyNodeLink(link.url, link.name)
+        let parsed = parseProxyNodeLink(link.url, fallbackName: link.name)
         return parsed.ok ? parsed : nil
     }
     if !parsedNodes.isEmpty {

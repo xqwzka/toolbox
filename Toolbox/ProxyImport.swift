@@ -249,7 +249,7 @@ func proxyExtractRuleEntries(_ text: String) -> [ProxyRuleEntry] {
         }
         if let match = row.range(of: #"^\s+-\s*(.+?)\s*$"#, options: .regularExpression) {
             let dashRange = row.range(of: "-")!
-            let item = String(row[row.index(after: dashRange)...]).trimmingCharacters(in: .whitespaces)
+            let item = String(row[dashRange.upperBound...]).trimmingCharacters(in: .whitespaces)
             _ = match
             entries.append(ProxyRuleEntry(name: pending, value: proxyYamlScalar(item).asString()))
             pending = ""
@@ -335,7 +335,7 @@ private func proxyURLHost(_ value: String) -> String {
 }
 
 /// Returns (name, url) or an error message, mirroring the page.
-func proxyNodeToLink(_ node: [String: YamlNode]) -> Result<(name: String, url: String), String> {
+func proxyNodeToLink(_ node: [String: YamlNode]) -> Result<(name: String, url: String), ProxyImportError> {
     let type = node["type"]?.asString().lowercased() ?? ""
     let server = node["server"]?.asString() ?? ""
     let port = node["port"]?.asInt() ?? 0
@@ -343,15 +343,15 @@ func proxyNodeToLink(_ node: [String: YamlNode]) -> Result<(name: String, url: S
     let displayName = name.isEmpty ? type.uppercased() + " 节点" : name
     let host = proxyURLHost(server)
     if host.isEmpty || port == 0 {
-        return .failure("节点「\(displayName)」缺少服务器或端口")
+        return .failure(ProxyImportError.message("节点「\(displayName)」缺少服务器或端口"))
     }
-    func finish(_ url: String) -> Result<(name: String, url: String), String> {
+    func finish(_ url: String) -> Result<(name: String, url: String), ProxyImportError> {
         .success((displayName, url))
     }
     switch type {
     case "ss":
         if node["plugin"] != nil {
-            return .failure("节点「\(displayName)」使用了暂不支持导回编辑器的 SS 插件")
+            return .failure(ProxyImportError.message("节点「\(displayName)」使用了暂不支持导回编辑器的 SS 插件"))
         }
         let cipher = node["cipher"]?.asString() ?? ""
         let password = node["password"]?.asString() ?? ""
@@ -361,7 +361,7 @@ func proxyNodeToLink(_ node: [String: YamlNode]) -> Result<(name: String, url: S
         let headers = ws["headers"]?.asObject ?? [:]
         let uuid = node["uuid"]?.asString() ?? ""
         if uuid.isEmpty {
-            return .failure("节点「\(displayName)」缺少 UUID")
+            return .failure(ProxyImportError.message("节点「\(displayName)」缺少 UUID"))
         }
         let alterId: Int
         if let v = node["alterId"] { alterId = v.asInt() }
@@ -395,14 +395,14 @@ func proxyNodeToLink(_ node: [String: YamlNode]) -> Result<(name: String, url: S
         if !items.isEmpty { components.queryItems = items }
         components.fragment = displayName
         guard let url = components.url?.absoluteString else {
-            return .failure("节点「\(displayName)」无法生成链接")
+            return .failure(ProxyImportError.message("节点「\(displayName)」无法生成链接"))
         }
         return finish(url)
     case "vless":
         let reality = node["reality-opts"]?.asObject ?? [:]
         let uuid = node["uuid"]?.asString() ?? ""
         if uuid.isEmpty {
-            return .failure("节点「\(displayName)」缺少 UUID")
+            return .failure(ProxyImportError.message("节点「\(displayName)」缺少 UUID"))
         }
         var components = URLComponents()
         components.scheme = "vless"
@@ -434,7 +434,7 @@ func proxyNodeToLink(_ node: [String: YamlNode]) -> Result<(name: String, url: S
         components.queryItems = items
         components.fragment = displayName
         guard let url = components.url?.absoluteString else {
-            return .failure("节点「\(displayName)」无法生成链接")
+            return .failure(ProxyImportError.message("节点「\(displayName)」无法生成链接"))
         }
         return finish(url)
     case "hysteria2", "hy2":
@@ -451,11 +451,11 @@ func proxyNodeToLink(_ node: [String: YamlNode]) -> Result<(name: String, url: S
         if !items.isEmpty { components.queryItems = items }
         components.fragment = displayName
         guard let url = components.url?.absoluteString else {
-            return .failure("节点「\(displayName)」无法生成链接")
+            return .failure(ProxyImportError.message("节点「\(displayName)」无法生成链接"))
         }
         return finish(url)
     default:
-        return .failure("节点「\(displayName)」的类型 \(type) 暂不支持导回编辑器")
+        return .failure(ProxyImportError.message("节点「\(displayName)」的类型 \(type) 暂不支持导回编辑器"))
     }
 }
 
@@ -502,8 +502,8 @@ func proxyImportedState(_ text: String) throws -> ProxyImportedConfig {
             switch proxyNodeToLink(object) {
             case .success(let converted):
                 result.nodeLinks.append(ProxyNodeLink(id: newProxyID(), name: converted.name, url: converted.url))
-            case .failure(let message):
-                warnings.append(message)
+            case .failure(let error):
+                warnings.append(error.localizedDescription)
             }
         }
     }

@@ -47,7 +47,7 @@ struct ProxyEditorView: View {
                     )
                 }
                 ForEach(draft.nodeLinks) { node in
-                    let parsed = parseProxyNodeLink(node.url, node.name)
+                    let parsed = parseProxyNodeLink(node.url, fallbackName: node.name)
                     ProxyEditorRow(
                         title: parsed.name,
                         subtitle: parsed.ok ? "单个节点 · \(parsed.protocolName)" : "未识别 · \(parsed.error ?? "")",

@@ -96,9 +96,11 @@ struct RegionDef {
 /// must not wipe a user's saved config.
 extension KeyedDecodingContainer {
     func decodeOrDefault<T: Decodable>(_ type: T.Type, forKey key: Key, default defaultValue: T) -> T {
-        if let nested = try? decodeIfPresent(T.self, forKey: key), let value = nested {
-            return value
-        }
+        do {
+            if let value = try decodeIfPresent(T.self, forKey: key) {
+                return value
+            }
+        } catch { }
         return defaultValue
     }
 }

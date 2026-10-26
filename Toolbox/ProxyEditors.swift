@@ -95,7 +95,7 @@ struct ProxyNodeSheet: View {
     }
 
     private var parsed: ParsedProxyNode {
-        parseProxyNodeLink(url, name)
+        parseProxyNodeLink(url, fallbackName: name)
     }
 
     var body: some View {
@@ -305,7 +305,7 @@ struct ProxyStrategySheet: View {
                     if !draft.nodeLinks.isEmpty {
                         Text("单个节点").font(.caption).foregroundColor(.gray)
                         ForEach(draft.nodeLinks) { node in
-                            let parsed = parseProxyNodeLink(node.url, node.name)
+                            let parsed = parseProxyNodeLink(node.url, fallbackName: node.name)
                             let checked = selectedNodes.contains(node.id)
                             Button {
                                 if checked {
@@ -398,7 +398,7 @@ private func proxyDialerSuggestions(draft: ConfigData, excluding name: String) -
     var names = ["Proxy"]
     names.append(contentsOf: draft.strategies.map { $0.name }.filter { $0 != name })
     names.append(contentsOf: draft.nodeLinks.compactMap { node in
-        let parsed = parseProxyNodeLink(node.url, node.name)
+        let parsed = parseProxyNodeLink(node.url, fallbackName: node.name)
         return parsed.ok ? parsed.name : nil
     })
     return proxyUniqueValues(names)
