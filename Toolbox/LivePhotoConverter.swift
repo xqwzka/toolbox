@@ -255,7 +255,7 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
     // when the metadata input reports itself ready (the
     // documented pattern): appending right after startSession
     // crashed on-device (step marker "写视频标记", 2026-10-26).
-    func metadataItem(key: String, value: NSObject) -> AVMutableMetadataItem {
+    func metadataItem(key: String, value: any NSCopying & NSObjectProtocol) -> AVMutableMetadataItem {
         let item = AVMutableMetadataItem()
         item.keySpace = .quickTimeMetadata
         item.key = key as NSString
