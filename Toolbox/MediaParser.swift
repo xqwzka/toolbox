@@ -176,39 +176,75 @@ private func parseLuotian(shareText: String, platform: DownloadPlatform) async t
     }
     var videos: [String] = []
     var images: [String] = []
-    func classify(_ string: String) {
+    // Douyin's CDN links often carry no .mp4/.jpg suffix at all
+    // (image hosts serve ~tplv-...image URLs, video hosts serve
+    // bare videoplayback paths), so extension alone drops most
+    // album items. The key name and the CDN host/path carry the
+    // type instead: p-hosts and tos-cn-i/tos-alisg-i paths are
+    // pictures, v-hosts and /video/ paths are video.
+    enum KeyHint {
+        case video
+        case image
+        case media
+        case other
+    }
+    func classify(_ string: String, hint: KeyHint) {
         let lower = string.lowercased()
         guard lower.hasPrefix("http") else { return }
-        if lower.contains(".mp4") || lower.contains(".mov") {
+        if lower.contains(".mp4") || lower.contains(".mov") || lower.contains(".m3u8") {
             videos.append(string)
-        } else if lower.contains(".m3u8") {
-            videos.append(string)
-        } else if lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".png") || lower.contains(".webp") {
+            return
+        }
+        if lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".png") || lower.contains(".webp") || lower.contains(".image") {
             images.append(string)
+            return
+        }
+        switch hint {
+        case .image:
+            images.append(string)
+        case .video:
+            videos.append(string)
+        case .media:
+            let host = URL(string: string)?.host?.lowercased() ?? ""
+            let isDouyinCDN = host.contains("douyinpic") || host.contains("tiktokcdn")
+            if isDouyinCDN, let first = host.first, first == "p" {
+                images.append(string)
+            } else if isDouyinCDN, let first = host.first, first == "v" {
+                videos.append(string)
+            } else if lower.contains("tos-cn-i-") || lower.contains("tos-alisg-i-") {
+                images.append(string)
+            } else if lower.contains("/video/") || lower.contains("tos-cn-p-") {
+                videos.append(string)
+            } else {
+                videos.append(string)
+            }
+        case .other:
+            break
         }
     }
     func scan(_ value: Any) {
         if let dict = value as? [String: Any] {
             for (key, child) in dict {
                 let keyLower = key.lowercased()
-                if keyLower.contains("video") || keyLower.contains("media") || keyLower == "url" {
-                    if let string = child as? String {
-                        classify(string)
-                    } else if let array = child as? [Any] {
-                        for item in array {
-                            if let string = item as? String {
-                                classify(string)
-                            }
-                        }
-                    }
+                let hint: KeyHint?
+                if keyLower.contains("video") {
+                    hint = .video
+                } else if keyLower.contains("image") || keyLower.contains("pic") || keyLower.contains("img") {
+                    hint = .image
+                } else if keyLower.contains("media") {
+                    hint = .media
+                } else if keyLower == "url" {
+                    hint = .other
+                } else {
+                    hint = nil
                 }
-                if keyLower.contains("image") || keyLower.contains("pic") || keyLower.contains("img") {
+                if let hint {
                     if let string = child as? String {
-                        classify(string)
+                        classify(string, hint: hint)
                     } else if let array = child as? [Any] {
                         for item in array {
                             if let string = item as? String {
-                                classify(string)
+                                classify(string, hint: hint)
                             }
                         }
                     }
