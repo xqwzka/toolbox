@@ -11,10 +11,13 @@ struct CardCodesRootView: View {
 
     @State private var searchText = ""
     @State private var filter: CodeFilter = .all
-    @State private var hideCodes = true
     @State private var showingAdd = false
+    @State private var showingImporter = false
+    @State private var showingExporter = false
+    @State private var exportURL: URL?
     @State private var editingCode: CardCode?
     @State private var toastVisible = false
+    @State private var toastText = "已复制，已标记为已使用"
     @State private var toastID = 0
 
     private var filteredCodes: [CardCode] {
@@ -69,7 +72,7 @@ struct CardCodesRootView: View {
                     codeList
                 }
                 if toastVisible {
-                    ToastView(text: "已复制，已标记为已使用")
+                    ToastView(text: toastText)
                         .padding(.bottom, 24)
                 }
             }
@@ -79,9 +82,16 @@ struct CardCodesRootView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        hideCodes.toggle()
+                        showingImporter = true
                     } label: {
-                        Image(systemName: hideCodes ? "eye.slash" : "eye")
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        prepareExport()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -92,6 +102,16 @@ struct CardCodesRootView: View {
                     }
                 }
             }
+            .background(
+                TextFilePicker(isPresented: $showingImporter) { urls in
+                    if let url = urls.first {
+                        importTextFile(url)
+                    }
+                }
+            )
+            .background(
+                ActivityView(isPresented: $showingExporter, url: exportURL)
+            )
             .sheet(isPresented: $showingAdd) {
                 AddCardView()
             }
@@ -112,7 +132,7 @@ struct CardCodesRootView: View {
                         Button {
                             copy(record)
                         } label: {
-                            CardRowView(record: record, hideCode: hideCodes)
+                            CardRowView(record: record)
                         }
                         .buttonStyle(.plain)
                         .listRowBackground(Color.clear)
@@ -161,9 +181,56 @@ struct CardCodesRootView: View {
         record.copiedAt = nil
     }
 
-    private func showToast() {
+    /// Import a .txt file: one code per line, optionally
+    /// `code|note` (or code,note / code，note, same as batch add).
+    /// Existing codes and in-file duplicates are skipped.
+    private func importTextFile(_ url: URL) {
+        guard let data = try? Data(contentsOf: url) else {
+            showToast("导入失败，读不到这个文件")
+            return
+        }
+        let text = String(decoding: data, as: UTF8.self)
+        let existing = Set(codes.map(\.code))
+        let parsed = parseBatch(text, existing: existing)
+        for item in parsed.items {
+            context.insert(CardCode(code: item.code, note: item.note))
+        }
+        if parsed.items.isEmpty {
+            showToast("没有可导入的卡密")
+        } else if parsed.skipped > 0 {
+            showToast("导入 \(parsed.items.count) 条，跳过 \(parsed.skipped) 条重复")
+        } else {
+            showToast("导入 \(parsed.items.count) 条")
+        }
+    }
+
+    /// Export all codes to a .txt file in the same one-per-line
+    /// format import reads back, then open the share sheet so it
+    /// can be saved to Files or sent elsewhere.
+    private func prepareExport() {
+        guard !codes.isEmpty else {
+            showToast("暂无卡密可导出")
+            return
+        }
+        let lines = codes.map { record in
+            record.note.isEmpty ? record.code : "\(record.code)|\(record.note)"
+        }
+        let text = lines.joined(separator: "\n")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("卡密导出.txt")
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            showToast("导出失败，写不出文件")
+            return
+        }
+        exportURL = url
+        showingExporter = true
+    }
+
+    private func showToast(_ message: String = "已复制，已标记为已使用") {
         toastID += 1
         let currentID = toastID
+        toastText = message
         toastVisible = true
         Task {
             try? await Task.sleep(for: .seconds(1.5))

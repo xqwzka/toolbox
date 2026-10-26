@@ -34,11 +34,8 @@ struct ToolboxRootView: View {
             } label: {
                 Image(systemName: "rectangle.3.offgrid.fill")
                     .font(.title3)
-                    .foregroundColor(.white)
                     .frame(width: 56, height: 56)
-                    .background(Color.black.opacity(0.85))
-                    .clipShape(Circle())
-                    .shadow(color: Color.black.opacity(0.25), radius: 6, y: 3)
+                    .liquidGlassCircle()
             }
             .padding(.trailing, 20)
             // Clears the ledger tab's own bottom bar; on the other
@@ -56,41 +53,48 @@ struct ToolboxRootView: View {
 }
 
 /// The switch page: one card per function, current one marked.
+/// Plain VStack rows (not a List): the whole row is the button,
+/// so tapping anywhere on a row switches — no dead zones.
 struct SwitcherView: View {
     let current: ToolboxTab
     let onSelect: (ToolboxTab) -> Void
 
     var body: some View {
         NavigationStack {
-            List {
-                SwitcherRow(
-                    icon: "list.bullet",
-                    color: AppTheme.yellow,
-                    title: "记账",
-                    subtitle: "简记账 · 明细与图表",
-                    isCurrent: current == .ledger
-                ) {
-                    onSelect(.ledger)
+            ScrollView {
+                VStack(spacing: 12) {
+                    SwitcherRow(
+                        icon: "list.bullet",
+                        color: AppTheme.yellow,
+                        title: "记账",
+                        subtitle: "简记账 · 明细与图表",
+                        isCurrent: current == .ledger
+                    ) {
+                        onSelect(.ledger)
+                    }
+                    SwitcherRow(
+                        icon: "key.fill",
+                        color: CardTheme.accent,
+                        title: "卡密",
+                        subtitle: "卡密管家 · 点按复制",
+                        isCurrent: current == .cardcodes
+                    ) {
+                        onSelect(.cardcodes)
+                    }
+                    SwitcherRow(
+                        icon: "doc.text",
+                        color: .blue,
+                        title: "网页",
+                        subtitle: "本地网页 · 本地 HTML 查看",
+                        isCurrent: current == .web
+                    ) {
+                        onSelect(.web)
+                    }
                 }
-                SwitcherRow(
-                    icon: "key.fill",
-                    color: CardTheme.accent,
-                    title: "卡密",
-                    subtitle: "卡密管家 · 点按复制",
-                    isCurrent: current == .cardcodes
-                ) {
-                    onSelect(.cardcodes)
-                }
-                SwitcherRow(
-                    icon: "doc.text",
-                    color: .blue,
-                    title: "网页",
-                    subtitle: "本地网页 · 本地 HTML 查看",
-                    isCurrent: current == .web
-                ) {
-                    onSelect(.web)
-                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
             }
+            .background(CardTheme.background.ignoresSafeArea())
             .navigationTitle("切换功能")
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -127,8 +131,32 @@ private struct SwitcherRow: View {
                         .foregroundColor(.blue)
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(Color.white)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Liquid Glass circle for the floating switch button on iOS 26+,
+/// plain black circle on older systems.
+extension View {
+    @ViewBuilder
+    func liquidGlassCircle() -> some View {
+        if #available(iOS 26.0, *) {
+            self
+                .foregroundColor(.primary)
+                .glassEffect(.regular, in: Circle())
+        } else {
+            self
+                .foregroundColor(.white)
+                .background(Color.black.opacity(0.85))
+                .clipShape(Circle())
+                .shadow(color: Color.black.opacity(0.25), radius: 6, y: 3)
+        }
     }
 }
