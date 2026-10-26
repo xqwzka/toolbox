@@ -30,6 +30,7 @@ struct DownloadRootView: View {
     @State private var trimStart: Double = 0
     @State private var trimDuration: Double = 0
     @State private var isConvertingLive = false
+    @State private var liveDebugText = ""
     @State private var showPhotoPicker = false
     @State private var showVideoFilePicker = false
     @State private var player: AVPlayer?
@@ -55,6 +56,7 @@ struct DownloadRootView: View {
                     }
                     .padding(16)
                 }
+                .onAppear { refreshLiveDebug() }
                 if toastVisible {
                     DownloadToastView(text: toastText)
                         .padding(.bottom, 24)
@@ -288,6 +290,8 @@ struct DownloadRootView: View {
     private func downloadLivePhoto(_ item: LivePhotoItem) async {
         downloadingLivePhotos.insert(item.videoURL.absoluteString)
         defer { downloadingLivePhotos.remove(item.videoURL.absoluteString) }
+        liveDebugClear()
+        liveDebugMark("开始下载动图")
         do {
             let coverData = try await downloadData(from: item.coverURL)
             guard let coverImage = UIImage(data: coverData),
@@ -296,11 +300,13 @@ struct DownloadRootView: View {
                 return
             }
             let videoFile = try await downloadFile(from: item.videoURL)
+            liveDebugMark("动图下载完成，开始配对")
             try await saveLivePhotoPair(photoData: jpegData, videoURL: videoFile)
             showToast("已保存为 Live Photo，去相册长按播放")
         } catch {
             showToast("保存失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
         }
+        refreshLiveDebug()
     }
 
     private func downloadSingleImage(_ url: URL) async {
@@ -368,6 +374,11 @@ struct DownloadRootView: View {
                     showVideoFilePicker = true
                 }
                 .buttonStyle(.bordered)
+            }
+            if !liveDebugText.isEmpty {
+                Text("诊断：上次执行到「\(liveDebugText)」")
+                    .font(.caption)
+                    .foregroundColor(.gray)
             }
             if liveVideoURL != nil {
                 VStack(alignment: .leading, spacing: 12) {
@@ -472,6 +483,10 @@ struct DownloadRootView: View {
         player.play()
     }
 
+    private func refreshLiveDebug() {
+        liveDebugText = liveDebugLastLine()
+    }
+
     private func convertLive() async {
         guard let url = liveVideoURL else { return }
         isConvertingLive = true
@@ -483,6 +498,7 @@ struct DownloadRootView: View {
         } catch {
             showToast("转换失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
         }
+        refreshLiveDebug()
     }
 
     // MARK: - Cobalt + footer
