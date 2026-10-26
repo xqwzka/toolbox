@@ -63,7 +63,7 @@ func downloadData(from url: URL) async throws -> Data {
     return data
 }
 
-private func requestPhotoAddAccess() async -> Bool {
+func requestPhotoAddAccess() async -> Bool {
     await withCheckedContinuation { continuation in
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             continuation.resume(returning: status == .authorized || status == .limited)

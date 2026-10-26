@@ -1,5 +1,7 @@
 import SwiftUI
 import UIKit
+import AVKit
+import AVFoundation
 
 /// New screen: paste a share link, parse it, download the video
 /// or single images to the photo library.
@@ -21,6 +23,16 @@ struct DownloadRootView: View {
     @State private var downloadingImages: Set<String> = []
     @State private var downloadingAll = false
     @State private var showCobalt = false
+    @State private var liveVideoURL: URL?
+    @State private var liveVideoName = ""
+    @State private var liveVideoDuration: Double = 0
+    @State private var trimStart: Double = 0
+    @State private var trimDuration: Double = 0
+    @State private var isConvertingLive = false
+    @State private var showPhotoPicker = false
+    @State private var showVideoFilePicker = false
+    @State private var player: AVPlayer?
+    @State private var previewObserver: Any?
     @State private var sharingURL: URL?
     @State private var showingShare = false
     @State private var toastVisible = false
@@ -36,6 +48,7 @@ struct DownloadRootView: View {
                         if let result {
                             resultSection(result)
                         }
+                        liveSection
                         cobaltSection
                         footerNote
                     }
@@ -49,6 +62,16 @@ struct DownloadRootView: View {
             .navigationTitle("视频解析")
             .navigationBarTitleDisplayMode(.inline)
             .background(ActivityView(isPresented: $showingShare, url: sharingURL))
+            .background(
+                PhotoVideoPicker(isPresented: $showPhotoPicker) { url in
+                    handlePickedVideo(url)
+                }
+            )
+            .background(
+                VideoFilePicker(isPresented: $showVideoFilePicker) { url in
+                    handlePickedVideo(url)
+                }
+            )
         }
     }
 
@@ -267,6 +290,137 @@ struct DownloadRootView: View {
             shareFile(url, message: message)
         } catch {
             showToast("保存失败")
+        }
+    }
+
+    // MARK: - Video -> Live Photo
+
+    private var liveSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("视频转 Live Photo")
+                .font(.headline)
+            HStack(spacing: 12) {
+                Button("从相册选视频") {
+                    showPhotoPicker = true
+                }
+                .buttonStyle(.bordered)
+                Button("从文件选视频") {
+                    showVideoFilePicker = true
+                }
+                .buttonStyle(.bordered)
+            }
+            if liveVideoURL != nil {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(liveVideoName)
+                        .font(.subheadline)
+                        .lineLimit(1)
+                    Text("时长 \(String(format: "%.1f", liveVideoDuration))s · 片段最长 3s，静态图取片段中间一帧")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                    if let player {
+                        VideoPlayer(player: player)
+                            .frame(height: 220)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    HStack {
+                        Button("预览片段") {
+                            previewSegment()
+                        }
+                        .buttonStyle(.bordered)
+                        Spacer()
+                        Text("从 \(String(format: "%.1f", trimStart))s 开始，共 \(String(format: "%.1f", trimDuration))s")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                    if liveVideoDuration > 0.5 {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("开始：\(String(format: "%.1f", trimStart))s")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                            Slider(value: $trimStart, in: 0...max(0, liveVideoDuration - 0.5), step: 0.1)
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("时长：\(String(format: "%.1f", trimDuration))s")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                            Slider(value: $trimDuration, in: 0.5...max(0.5, min(3.0, liveVideoDuration - trimStart)), step: 0.1)
+                        }
+                    } else {
+                        Text("视频不足 0.5 秒，直接整段转换")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    }
+                    if isConvertingLive {
+                        ProgressView("转换中…")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                    } else {
+                        Button("转为 Live Photo") {
+                            Task { await convertLive() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(12)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+        }
+    }
+
+    private func handlePickedVideo(_ url: URL) {
+        if let oldPlayer = player, let token = previewObserver {
+            oldPlayer.removeTimeObserver(token)
+            previewObserver = nil
+        }
+        let ext = url.pathExtension.isEmpty ? "mov" : url.pathExtension
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext)
+        let stable: URL
+        do {
+            try FileManager.default.copyItem(at: url, to: dest)
+            stable = dest
+        } catch {
+            stable = url
+        }
+        liveVideoURL = stable
+        liveVideoName = url.lastPathComponent
+        player = AVPlayer(url: stable)
+        Task {
+            let asset = AVURLAsset(url: stable)
+            if let duration = try? await asset.load(.duration) {
+                let seconds = duration.seconds
+                liveVideoDuration = seconds
+                trimStart = 0
+                trimDuration = min(3.0, seconds)
+            }
+        }
+    }
+
+    private func previewSegment() {
+        guard let player, liveVideoDuration > 0 else { return }
+        if let token = previewObserver {
+            player.removeTimeObserver(token)
+            previewObserver = nil
+        }
+        let startTime = CMTime(seconds: trimStart, preferredTimescale: 600)
+        let endTime = CMTime(seconds: min(trimStart + trimDuration, liveVideoDuration), preferredTimescale: 600)
+        player.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        previewObserver = player.addBoundaryTimeObserver(forTimes: [NSValue(time: endTime)], queue: .main) {
+            player.pause()
+        }
+        player.play()
+    }
+
+    private func convertLive() async {
+        guard let url = liveVideoURL else { return }
+        isConvertingLive = true
+        defer { isConvertingLive = false }
+        let duration = min(min(trimDuration, 3.0), max(0.1, liveVideoDuration - trimStart))
+        do {
+            try await convertVideoToLivePhoto(sourceURL: url, start: trimStart, duration: duration)
+            showToast("已保存为 Live Photo，去相册长按播放")
+        } catch {
+            showToast("转换失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
         }
     }
 
