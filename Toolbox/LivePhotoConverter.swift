@@ -207,7 +207,9 @@ private func embedContentIdentifier(jpegData: Data, identifier: String) -> Data 
 /// reports itself ready, and the callback is registered only
 /// after the session starts: registering it before startSession
 /// let it fire before the session existed and crashed on-device
-/// (step marker "加写入输入", 2026-10-26).
+/// (step marker "加写入输入", 2026-10-26). The adaptor itself is
+/// created inside the ready callback: creating it during setup
+/// crashed on-device (step marker "建元数据适配器", 2026-10-26).
 private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: String) async throws -> URL {
     liveDebugMark("读轨道")
     let asset = AVURLAsset(url: videoURL)
@@ -233,8 +235,10 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
     liveDebugMark("建元数据输入")
     let metadataInput = AVAssetWriterInput(mediaType: .metadata, outputSettings: nil)
     metadataInput.expectsMediaDataInRealTime = false
-    liveDebugMark("建元数据适配器")
-    let metadataAdaptor = AVAssetWriterInputMetadataAdaptor(assetWriterInput: metadataInput)
+    // The metadata adaptor is created in the ready callback
+    // below, after the session starts: creating it here
+    // crashed on-device (step marker "建元数据适配器",
+    // 2026-10-26 19:56).
     liveDebugMark("加视频输入")
     guard writer.canAdd(videoInput) else {
         throw LivePhotoError.writerFailed
@@ -303,6 +307,8 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
     metadataInput.requestMediaDataWhenReady(on: writingQueue) {
         guard writer.status == .writing, !metadataState.appended, metadataInput.isReadyForMoreMediaData else { return }
         metadataState.appended = true
+        liveDebugMark("建元数据适配器")
+        let metadataAdaptor = AVAssetWriterInputMetadataAdaptor(assetWriterInput: metadataInput)
         _ = metadataAdaptor.append(identifierGroup)
         _ = metadataAdaptor.append(stillGroup)
         metadataInput.markAsFinished()
