@@ -20,10 +20,6 @@ struct WebRootView: View {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
-    private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-    }
-
     var body: some View {
         NavigationStack {
             Group {
@@ -31,7 +27,7 @@ struct WebRootView: View {
                     ContentUnavailableView(
                         "还没有导入的网页",
                         systemImage: "doc.text",
-                        description: Text("点右上角的 + 导入 .html 文件，导入后点文件名即可在 App 内打开。版本 \(appVersion)。")
+                        description: Text("点右上角的 + 导入 .html 文件，导入后点文件名即可在 App 内打开。")
                     )
                 } else {
                     List {
@@ -44,8 +40,6 @@ struct WebRootView: View {
                                 }
                             }
                             .onDelete(perform: delete)
-                        } footer: {
-                            Text("版本 \(appVersion)")
                         }
                     }
                 }
