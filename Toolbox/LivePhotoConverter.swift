@@ -42,6 +42,9 @@ private func liveDebugURL() -> URL {
 
 func liveDebugClear() {
     try? "".write(to: liveDebugURL(), atomically: true, encoding: .utf8)
+    // A new attempt clears the previous crash report; a report
+    // shown on launch therefore always belongs to the last run.
+    liveCrashClear()
 }
 
 func liveDebugMark(_ step: String) {
@@ -67,6 +70,39 @@ func liveDebugLastLine() -> String {
 /// callback and the pump completion run on the writer queue).
 private final class MetadataAppendState: @unchecked Sendable {
     var appended = false
+}
+
+// MARK: - Crash capture
+//
+// AVFoundation failures here raise ObjC exceptions, which kill
+// the app without a Swift error and leave no toast behind.
+// Record the exception (name, reason, stack) to Documents so
+// the next launch can show the real reason instead of another
+// round of guessing at the crash point.
+private func liveCrashURL() -> URL {
+    let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        ?? FileManager.default.temporaryDirectory
+    return base.appendingPathComponent("toolbox-crash.txt")
+}
+
+func installLiveCrashCapture() {
+    NSSetUncaughtExceptionHandler { exception in
+        let text = "NSException: \(exception.name.rawValue)\nReason: \(exception.reason ?? "")\nStack:\n\(exception.callStackSymbols.joined(separator: "\n"))"
+        try? text.write(to: liveCrashURL(), atomically: true, encoding: .utf8)
+    }
+}
+
+/// First two lines of the crash file (exception name + reason),
+/// or "" when there is no recorded crash.
+func liveCrashSummary() -> String {
+    guard let text = try? String(contentsOf: liveCrashURL(), encoding: .utf8), !text.isEmpty else {
+        return ""
+    }
+    return text.split(separator: "\n").prefix(2).joined(separator: "\n")
+}
+
+func liveCrashClear() {
+    try? FileManager.default.removeItem(at: liveCrashURL())
 }
 
 enum LivePhotoError: Error, LocalizedError {
@@ -202,7 +238,8 @@ private func embedContentIdentifier(jpegData: Data, identifier: String) -> Data 
 /// Re-mux the clip with a QuickTime metadata track:
 /// content-identifier at time zero, still-image-time at the still
 /// frame. Video and audio tracks pass through untouched (nil
-/// output settings). still-image-time is an NSNumber (seconds).
+/// output settings). still-image-time is a 32-bit float NSNumber
+/// (seconds, the QuickTime still-image-time storage form).
 /// Metadata groups are appended only when the metadata input
 /// reports itself ready, and the callback is registered only
 /// after the session starts: registering it before startSession
@@ -280,11 +317,11 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
         items: [metadataItem(key: "com.apple.quicktime.content-identifier", value: identifier as NSString)],
         timeRange: CMTimeRange(start: .zero, duration: CMTime(seconds: 0.1, preferredTimescale: 600))
     )
-    // still-image-time is numeric (NSNumber seconds): the two
-    // earlier value forms (NSValue(time:) and NSString) both
-    // crashed on-device.
+    // still-image-time as a 32-bit float number (the QuickTime
+    // storage form); earlier forms (NSValue(time:), NSString,
+    // 64-bit NSNumber) were all in builds that crashed on-device.
     let stillGroup = AVTimedMetadataGroup(
-        items: [metadataItem(key: "com.apple.quicktime.still-image-time", value: NSNumber(value: stillTime.seconds))],
+        items: [metadataItem(key: "com.apple.quicktime.still-image-time", value: NSNumber(value: Float(stillTime.seconds)))],
         timeRange: CMTimeRange(start: stillTime, duration: CMTime(seconds: 0.1, preferredTimescale: 600))
     )
     let writingQueue = DispatchQueue(label: "livephoto.writer")
@@ -309,6 +346,7 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
         metadataState.appended = true
         liveDebugMark("建元数据适配器")
         let metadataAdaptor = AVAssetWriterInputMetadataAdaptor(assetWriterInput: metadataInput)
+        liveDebugMark("追加元数据组")
         _ = metadataAdaptor.append(identifierGroup)
         _ = metadataAdaptor.append(stillGroup)
         metadataInput.markAsFinished()

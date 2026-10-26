@@ -31,6 +31,7 @@ struct DownloadRootView: View {
     @State private var trimDuration: Double = 0
     @State private var isConvertingLive = false
     @State private var liveDebugText = ""
+    @State private var liveCrashText = ""
     @State private var showPhotoPicker = false
     @State private var showVideoFilePicker = false
     @State private var player: AVPlayer?
@@ -380,6 +381,12 @@ struct DownloadRootView: View {
                     .font(.caption)
                     .foregroundColor(.gray)
             }
+            if !liveCrashText.isEmpty {
+                Text("上次崩溃原因：\(liveCrashText)")
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .lineLimit(4)
+            }
             if liveVideoURL != nil {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(liveVideoName)
@@ -485,6 +492,7 @@ struct DownloadRootView: View {
 
     private func refreshLiveDebug() {
         liveDebugText = liveDebugLastLine()
+        liveCrashText = liveCrashSummary()
     }
 
     private func convertLive() async {
