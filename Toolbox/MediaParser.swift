@@ -290,6 +290,8 @@ private func parseLuotian(shareText: String, platform: DownloadPlatform) async t
                     hint = .video
                 } else if keyLower.contains("image") || keyLower.contains("pic") || keyLower.contains("img") {
                     hint = .image
+                } else if keyLower.contains("cover") {
+                    hint = .image
                 } else if keyLower.contains("media") {
                     hint = .media
                 } else if keyLower == "url" {
@@ -304,6 +306,13 @@ private func parseLuotian(shareText: String, platform: DownloadPlatform) async t
                         for item in array {
                             if let string = item as? String {
                                 classify(string, hint: hint)
+                            } else if let dictItem = item as? [String: Any],
+                                      let urlString = dictItem["url"] as? String {
+                                // Array items are sometimes objects
+                                // ({"url": ...}) instead of bare strings;
+                                // the array's key already declares the
+                                // content type, so the same hint applies.
+                                classify(urlString, hint: hint)
                             }
                         }
                     }

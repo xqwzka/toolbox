@@ -99,6 +99,7 @@ struct DownloadRootView: View {
                 if let url = viewingVideo {
                     VideoViewerView(
                         url: url,
+                        audioURL: viewingAudio,
                         quality: viewingQuality,
                         isDownloading: downloadingVideo,
                         progress: videoProgress,
@@ -189,21 +190,50 @@ struct DownloadRootView: View {
                     }
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                         ForEach(videoList, id: \.absoluteString) { url in
-                            Button {
-                                viewingVideo = url
-                                viewingAudio = url == parsed.videoURL ? parsed.audioURL : nil
-                                viewingQuality = url == parsed.videoURL ? parsed.videoQuality : nil
-                            } label: {
-                                ZStack(alignment: .bottomTrailing) {
-                                    VideoThumbView(url: url, size: gridCell)
-                                    Image(systemName: "play.circle.fill")
+                            ZStack(alignment: .bottomTrailing) {
+                                VideoThumbView(url: url, size: gridCell)
+                                Image(systemName: "play.circle.fill")
+                                    .font(.title3)
+                                    .foregroundColor(.white)
+                                    .shadow(radius: 2)
+                                    .padding(6)
+                            }
+                            .overlay(alignment: .bottomLeading) {
+                                Button {
+                                    Task { await downloadVideoURL(url, audioURL: url == parsed.videoURL ? parsed.audioURL : nil) }
+                                } label: {
+                                    Image(systemName: "arrow.down.circle.fill")
                                         .font(.title3)
                                         .foregroundColor(.white)
                                         .shadow(radius: 2)
                                         .padding(6)
                                 }
+                                .buttonStyle(.plain)
+                                .disabled(downloadingVideo)
                             }
-                            .buttonStyle(.plain)
+                            .onTapGesture {
+                                viewingVideo = url
+                                viewingAudio = url == parsed.videoURL ? parsed.audioURL : nil
+                                viewingQuality = url == parsed.videoURL ? parsed.videoQuality : nil
+                            }
+                        }
+                    }
+                    // Download progress lives outside the viewer
+                    // now, so a download started from the grid
+                    // shows its state here instead of nowhere.
+                    if downloadingVideo {
+                        HStack(spacing: 8) {
+                            if let fraction = videoProgress.fraction {
+                                ProgressView(value: fraction)
+                                Text("\(Int(fraction * 100))%")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            } else {
+                                ProgressView()
+                                Text("处理中…")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
                         }
                     }
                 }
@@ -334,6 +364,9 @@ struct DownloadRootView: View {
         let videoFile = try await downloadFileWithProgress(from: videoURL) { fraction in
             box.fraction = fraction
         }
+        // Video bytes are done; audio download + mux + save
+        // show as processing, not a stuck 100%.
+        box.fraction = nil
         let finalFile: URL
         if let audioURL {
             let audioFile = try await downloadFile(from: audioURL, defaultExtension: "m4a")
@@ -694,6 +727,7 @@ final class VideoDownloadProgress: ObservableObject {
 /// down on disappear so nothing keeps playing behind the sheet.
 private struct VideoViewerView: View {
     let url: URL
+    let audioURL: URL?
     let quality: String?
     let isDownloading: Bool
     @ObservedObject var progress: VideoDownloadProgress
@@ -702,6 +736,24 @@ private struct VideoViewerView: View {
     @State private var player: AVPlayer?
     @State private var playError: String?
     @State private var failureObserver: NSObjectProtocol?
+    @State private var viewActive = false
+
+    private enum PreviewError: Error {
+        case noTracks
+    }
+
+    private func startPlayer(_ p: AVPlayer) {
+        player = p
+        failureObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: p.currentItem,
+            queue: .main
+        ) { note in
+            let detail = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?.localizedDescription
+            playError = detail ?? "视频加载失败，可能是当前网络打不开这个播放地址"
+        }
+        p.play()
+    }
 
     var body: some View {
         ZStack {
@@ -758,21 +810,45 @@ private struct VideoViewerView: View {
             }
         }
         .onAppear {
-            let p = AVPlayer(url: url)
-            player = p
-            // A failed stream used to sit on a black screen
-            // with no message; surface the failure instead.
-            failureObserver = NotificationCenter.default.addObserver(
-                forName: .AVPlayerItemFailedToPlayToEndTime,
-                object: p.currentItem,
-                queue: .main
-            ) { note in
-                let detail = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?.localizedDescription
-                playError = detail ?? "视频加载失败，可能是当前网络打不开这个播放地址"
+            viewActive = true
+            // Split streams (YouTube) are video-only, so a plain
+            // player previews silent. Build a video+audio
+            // composition from the same two URLs the download
+            // muxes, so the preview has sound. Any failure
+            // falls back to video-only playback.
+            if let audioURL {
+                Task {
+                    let composition = AVMutableComposition()
+                    let videoAsset = AVURLAsset(url: url)
+                    let audioAsset = AVURLAsset(url: audioURL)
+                    do {
+                        guard let videoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
+                              let audioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else {
+                            throw PreviewError.noTracks
+                        }
+                        let videoDuration = try await videoAsset.load(.duration)
+                        let audioDuration = try await audioAsset.load(.duration)
+                        let duration = videoDuration < audioDuration ? videoDuration : audioDuration
+                        guard duration > .zero,
+                              let compVideo = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+                              let compAudio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                            throw PreviewError.noTracks
+                        }
+                        try compVideo.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: videoTrack, at: .zero)
+                        try compAudio.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: audioTrack, at: .zero)
+                        guard viewActive else { return }
+                        startPlayer(AVPlayer(playerItem: AVPlayerItem(asset: composition)))
+                    } catch {
+                        guard viewActive else { return }
+                        startPlayer(AVPlayer(url: url))
+                    }
+                }
+            } else {
+                startPlayer(AVPlayer(url: url))
             }
-            p.play()
         }
         .onDisappear {
+            viewActive = false
             if let failureObserver {
                 NotificationCenter.default.removeObserver(failureObserver)
             }

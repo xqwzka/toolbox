@@ -60,12 +60,26 @@ func downloadFileWithProgress(from url: URL, defaultExtension: String = "mp4", o
     final class Delegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
         var continuation: CheckedContinuation<URL, Error>?
         var onProgress: ((Double) -> Void)?
+        var defaultExtension = "mp4"
 
         func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
             if let code = (downloadTask.response as? HTTPURLResponse)?.statusCode, code != 200 {
                 continuation?.resume(throwing: DownloadError.network)
             } else {
-                continuation?.resume(returning: location)
+                // Move the file NOW. The system may delete the
+                // temporary download as soon as this method
+                // returns, so copying later — after the
+                // continuation resumes — races deletion and the
+                // download "fails" on a missing file. That was
+                // the video-download error toast.
+                let ext = downloadTask.originalRequest?.url?.pathExtension ?? ""
+                let dest = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + (ext.isEmpty ? defaultExtension : ext))
+                do {
+                    try FileManager.default.copyItem(at: location, to: dest)
+                    continuation?.resume(returning: dest)
+                } catch {
+                    continuation?.resume(throwing: error)
+                }
             }
             continuation = nil
         }
@@ -85,6 +99,7 @@ func downloadFileWithProgress(from url: URL, defaultExtension: String = "mp4", o
 
     let delegate = Delegate()
     delegate.onProgress = onProgress
+    delegate.defaultExtension = defaultExtension
     // Bound the wait: the default resource timeout lets a
     // blackholed stream host spin for minutes with no message.
     // 30s per attempt fails fast enough to retry, then toast.
@@ -92,14 +107,12 @@ func downloadFileWithProgress(from url: URL, defaultExtension: String = "mp4", o
     config.timeoutIntervalForRequest = 30
     let session = URLSession(configuration: config, delegate: delegate, delegateQueue: .main)
     defer { session.finishTasksAndInvalidate() }
-    let tempURL = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+    // The delegate already moved the file to a stable temp
+    // path before resuming, so this URL stays valid.
+    return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
         delegate.continuation = continuation
         session.downloadTask(with: url).resume()
     }
-    let ext = url.pathExtension.isEmpty ? defaultExtension : url.pathExtension
-    let dest = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext)
-    try FileManager.default.copyItem(at: tempURL, to: dest)
-    return dest
 }
 
 func downloadData(from url: URL) async throws -> Data {
