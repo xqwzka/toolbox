@@ -49,6 +49,54 @@ func downloadFile(from url: URL, defaultExtension: String = "mp4") async throws 
     return dest
 }
 
+/// Download with progress. URLSession's async download API
+/// reports nothing while it runs, so video downloads looked
+/// dead until they either saved or failed. The delegate
+/// reports fractional progress; transport failures (no
+/// response at all) surface as URLError so callers can retry
+/// them, while HTTP errors surface as DownloadError.network
+/// (retrying a 403 is pointless).
+func downloadFileWithProgress(from url: URL, defaultExtension: String = "mp4", onProgress: (@escaping (Double) -> Void)? = nil) async throws -> URL {
+    final class Delegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+        var continuation: CheckedContinuation<URL, Error>?
+        var onProgress: ((Double) -> Void)?
+
+        func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+            if let code = (downloadTask.response as? HTTPURLResponse)?.statusCode, code != 200 {
+                continuation?.resume(throwing: DownloadError.network)
+            } else {
+                continuation?.resume(returning: location)
+            }
+            continuation = nil
+        }
+
+        func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+            guard totalBytesExpectedToWrite > 0 else { return }
+            onProgress?(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if let error {
+                continuation?.resume(throwing: error)
+                continuation = nil
+            }
+        }
+    }
+
+    let delegate = Delegate()
+    delegate.onProgress = onProgress
+    let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: .main)
+    defer { session.finishTasksAndInvalidate() }
+    let tempURL = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+        delegate.continuation = continuation
+        session.downloadTask(with: url).resume()
+    }
+    let ext = url.pathExtension.isEmpty ? defaultExtension : url.pathExtension
+    let dest = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext)
+    try FileManager.default.copyItem(at: tempURL, to: dest)
+    return dest
+}
+
 func downloadData(from url: URL) async throws -> Data {
     let data: Data
     let response: URLResponse

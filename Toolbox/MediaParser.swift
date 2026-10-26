@@ -81,7 +81,7 @@ func extractFirstURL(from text: String) -> String? {
 func detectPlatform(_ urlString: String) -> DownloadPlatform {
     let lower = urlString.lowercased()
     if lower.contains("douyin.com") { return .douyin }
-    if lower.contains("xiaohongshu.com") || lower.contains("xhslink.com") { return .xiaohongshu }
+    if lower.contains("xiaohongshu.com") || lower.contains("xhslink") { return .xiaohongshu }
     if lower.contains("kuaishou.com") { return .kuaishou }
     if lower.contains("bilibili.com") || lower.contains("b23.tv") { return .bilibili }
     if lower.contains("youtube.com") || lower.contains("youtu.be") { return .youtube }
@@ -194,8 +194,28 @@ func parseMedia(input: String, cobaltInstance: String?) async throws -> ParsedMe
 /// came back "ALAPI拒绝请求: 未知解析错误", so it is not routed
 /// here. Response fields vary by platform, so video/image
 /// candidates are collected by key name and file extension.
+/// xhslink.cn short links: resolve the redirect chain to the
+/// real xiaohongshu.com note URL first (URLSession follows
+/// redirects; response.url is the landing URL). Best-effort:
+/// on any failure the original share text is used unchanged,
+/// so a resolve failure can never break a working parse.
+private func resolveShortLink(in text: String) async -> String {
+    guard text.contains("xhslink"),
+          let short = extractFirstURL(from: text),
+          let shortURL = URL(string: short) else { return text }
+    var request = URLRequest(url: shortURL)
+    request.timeoutInterval = 15
+    guard let (_, response) = try? await URLSession.shared.data(for: request),
+          let finalURL = response.url,
+          finalURL.host?.contains("xiaohongshu.com") == true else {
+        return text
+    }
+    return text.replacingOccurrences(of: short, with: finalURL.absoluteString)
+}
+
 private func parseLuotian(shareText: String, platform: DownloadPlatform) async throws -> ParsedMedia {
-    let json = try await fetchJSON(postJSON(url: "https://api.luotian.cyou/api/videojiexi", body: ["share_text": shareText]))
+    let resolvedText = await resolveShortLink(in: shareText)
+    let json = try await fetchJSON(postJSON(url: "https://api.luotian.cyou/api/videojiexi", body: ["share_text": resolvedText]))
     if let dict = json as? [String: Any], let detail = dict["detail"] as? String {
         throw ParseError.message(detail)
     }
@@ -325,6 +345,14 @@ private func parseLuotian(shareText: String, platform: DownloadPlatform) async t
 /// and carousels only; private / age- / region-restricted posts
 /// need a login and come back success=false.
 private func parseInstagram(_ urlString: String) async throws -> ParsedMedia {
+    // Stories and highlights are only served to logged-in
+    // accounts, so no no-key backend can fetch them. Fail fast
+    // with a readable message instead of the backend's English
+    // one. A self-hosted cobalt instance is the way through
+    // (the dispatcher already routes there when one is set).
+    if urlString.lowercased().contains("/stories/") {
+        throw ParseError.message("这是 IG 快拍/精选，Instagram 只向登录账号提供，无法直接下载。公开帖子和 Reels 不需要登录，可以正常解析；如果填了自建 cobalt 实例，填好后再试一次")
+    }
     // Browser UA: the no-UA app request was never verified
     // against a real post on-device; the browser test that
     // verified this endpoint used a browser UA.
@@ -463,6 +491,10 @@ private func parseX(_ urlString: String) async throws -> ParsedMedia {
 /// app downloads the best avc1 mp4 video and the best mp4 audio
 /// and muxes them (see MediaDownload.muxVideo). Instance list is
 /// discovered live so a dead instance does not kill the feature.
+/// local=true makes the instance return proxied videoplayback
+/// URLs (via its companion host) instead of direct googlevideo
+/// URLs, which are IP-locked to the instance and 403 from the
+/// phone — that was the YouTube download failure.
 private func parseYouTube(_ urlString: String) async throws -> ParsedMedia {
     guard let videoID = extractYouTubeID(urlString) else {
         throw ParseError.message("认不出这个 YouTube 链接")
@@ -470,7 +502,7 @@ private func parseYouTube(_ urlString: String) async throws -> ParsedMedia {
     let instances = await discoverInvidiousInstances()
     var lastError: Error = ParseError.network
     for domain in instances {
-        var request = URLRequest(url: URL(string: "https://\(domain)/api/v1/videos/\(videoID)")!)
+        var request = URLRequest(url: URL(string: "https://\(domain)/api/v1/videos/\(videoID)?local=true")!)
         request.timeoutInterval = 20
         guard let json = try? await fetchJSON(request),
               let dict = json as? [String: Any],

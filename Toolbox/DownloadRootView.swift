@@ -38,6 +38,7 @@ struct DownloadRootView: View {
     @State private var viewingVideo: URL?
     @State private var viewingAudio: URL?
     @State private var viewingQuality: String?
+    @StateObject private var videoProgress = VideoDownloadProgress()
     @State private var previewObserver: Any?
     @State private var sharingURL: URL?
     @State private var showingShare = false
@@ -99,13 +100,10 @@ struct DownloadRootView: View {
                     VideoViewerView(
                         url: url,
                         quality: viewingQuality,
+                        isDownloading: downloadingVideo,
+                        progress: videoProgress,
                         onDownload: {
-                            let video = url
-                            let audio = viewingAudio
-                            viewingVideo = nil
-                            viewingAudio = nil
-                            viewingQuality = nil
-                            Task { await downloadVideoURL(video, audioURL: audio) }
+                            Task { await downloadVideoURL(url, audioURL: viewingAudio) }
                         },
                         onClose: {
                             viewingVideo = nil
@@ -305,31 +303,57 @@ struct DownloadRootView: View {
 
     // MARK: - Downloads
 
+    /// Video download with retries: transport errors (dropped
+    /// connection, timeout) get two more attempts; HTTP errors
+    /// (403 etc.) fail immediately — retrying them is pointless.
     private func downloadVideoURL(_ videoURL: URL, audioURL: URL?) async {
         downloadingVideo = true
         defer { downloadingVideo = false }
-        do {
-            let videoFile = try await downloadFile(from: videoURL)
-            let finalFile: URL
-            if let audioURL {
-                let audioFile = try await downloadFile(from: audioURL, defaultExtension: "m4a")
-                do {
-                    finalFile = try await muxVideo(videoURL: videoFile, audioURL: audioFile)
-                } catch {
-                    shareFile(videoFile, message: "音画合成失败，已打开分享菜单")
-                    return
-                }
-            } else {
-                finalFile = videoFile
-            }
+        for attempt in 0..<3 {
             do {
-                try await saveVideoToPhotos(finalFile)
-                showToast("已保存到相册")
+                try await downloadVideoURLOnce(videoURL, audioURL: audioURL)
+                return
+            } catch is URLError {
+                if attempt < 2 {
+                    try? await Task.sleep(for: .seconds(1))
+                    continue
+                }
+                showToast("下载失败，网络错误")
+                return
             } catch {
-                shareFile(finalFile, message: "保存到相册失败，已打开分享菜单")
+                showToast((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                return
             }
+        }
+    }
+
+    private func downloadVideoURLOnce(_ videoURL: URL, audioURL: URL?) async throws {
+        let box = videoProgress
+        box.fraction = 0
+        defer { box.fraction = nil }
+        let videoFile = try await downloadFileWithProgress(from: videoURL) { fraction in
+            box.fraction = fraction
+        }
+        let finalFile: URL
+        if let audioURL {
+            let audioFile = try await downloadFile(from: audioURL, defaultExtension: "m4a")
+            do {
+                finalFile = try await muxVideo(videoURL: videoFile, audioURL: audioFile)
+            } catch {
+                shareFile(videoFile, message: "音画合成失败，已打开分享菜单")
+                return
+            }
+        } else {
+            finalFile = videoFile
+        }
+        do {
+            try await saveVideoToPhotos(finalFile)
+            showToast("已保存到相册")
+            viewingVideo = nil
+            viewingAudio = nil
+            viewingQuality = nil
         } catch {
-            showToast("下载失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
+            shareFile(finalFile, message: "保存到相册失败，已打开分享菜单")
         }
     }
 
@@ -658,12 +682,21 @@ private struct VideoThumbView: View {
     }
 }
 
+/// Shared video-download progress. A class, so the URLSession
+/// delegate callback — which captures a reference — actually
+/// moves the UI; a struct copy would not.
+final class VideoDownloadProgress: ObservableObject {
+    @Published var fraction: Double?
+}
+
 /// Full-screen video viewing window: tap a thumbnail to watch,
 /// download from here. The player is created on appear and torn
 /// down on disappear so nothing keeps playing behind the sheet.
 private struct VideoViewerView: View {
     let url: URL
     let quality: String?
+    let isDownloading: Bool
+    @ObservedObject var progress: VideoDownloadProgress
     let onDownload: () -> Void
     let onClose: () -> Void
     @State private var player: AVPlayer?
@@ -689,13 +722,28 @@ private struct VideoViewerView: View {
                 } else {
                     Spacer()
                 }
-                HStack {
-                    Spacer()
-                    Button("下载") {
-                        onDownload()
+                VStack(spacing: 8) {
+                    if isDownloading {
+                        if let fraction = progress.fraction {
+                            ProgressView(value: fraction)
+                                .tint(.white)
+                            Text("\(Int(fraction * 100))%")
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.8))
+                        } else {
+                            ProgressView()
+                                .tint(.white)
+                        }
+                    } else {
+                        HStack {
+                            Spacer()
+                            Button("下载") {
+                                onDownload()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            Spacer()
+                        }
                     }
-                    .buttonStyle(.borderedProminent)
-                    Spacer()
                 }
                 .padding(16)
             }
