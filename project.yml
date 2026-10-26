@@ -9,6 +9,7 @@ targets:
     deploymentTarget: "17.0"
     sources: [Toolbox]
     info:
+      path: Toolbox/Info.plist
       properties:
         CFBundleDisplayName: 工具箱
         CFBundleVersion: "1"
