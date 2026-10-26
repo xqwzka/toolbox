@@ -204,8 +204,10 @@ private func embedContentIdentifier(jpegData: Data, identifier: String) -> Data 
 /// frame. Video and audio tracks pass through untouched (nil
 /// output settings). still-image-time is an NSNumber (seconds).
 /// Metadata groups are appended only when the metadata input
-/// reports itself ready: appending right after startSession
-/// crashed on-device (step marker "写视频标记", 2026-10-26).
+/// reports itself ready, and the callback is registered only
+/// after the session starts: registering it before startSession
+/// let it fire before the session existed and crashed on-device
+/// (step marker "加写入输入", 2026-10-26).
 private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: String) async throws -> URL {
     liveDebugMark("读轨道")
     let asset = AVURLAsset(url: videoURL)
@@ -218,17 +220,22 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
         throw LivePhotoError.writerFailed
     }
     liveDebugMark("加写入输入")
+    liveDebugMark("建视频输入")
     let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil)
     videoInput.expectsMediaDataInRealTime = false
     var audioInput: AVAssetWriterInput?
     if audioTrack != nil {
+        liveDebugMark("建音频输入")
         let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
         input.expectsMediaDataInRealTime = false
         audioInput = input
     }
+    liveDebugMark("建元数据输入")
     let metadataInput = AVAssetWriterInput(mediaType: .metadata, outputSettings: nil)
     metadataInput.expectsMediaDataInRealTime = false
+    liveDebugMark("建元数据适配器")
     let metadataAdaptor = AVAssetWriterInputMetadataAdaptor(assetWriterInput: metadataInput)
+    liveDebugMark("加视频输入")
     guard writer.canAdd(videoInput) else {
         throw LivePhotoError.writerFailed
     }
@@ -236,13 +243,16 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
     if let audioInput, writer.canAdd(audioInput) {
         writer.add(audioInput)
     }
+    liveDebugMark("加元数据输入")
     guard writer.canAdd(metadataInput) else {
         throw LivePhotoError.writerFailed
     }
     writer.add(metadataInput)
+    liveDebugMark("建读取器")
     guard let reader = try? AVAssetReader(asset: asset) else {
         throw LivePhotoError.writerFailed
     }
+    liveDebugMark("加读取输出")
     let videoOutput = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
     reader.add(videoOutput)
     var audioOutput: AVAssetReaderTrackOutput?
@@ -251,10 +261,10 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
         reader.add(output)
         audioOutput = output
     }
-    // Timed metadata groups, created upfront but appended only
-    // when the metadata input reports itself ready (the
-    // documented pattern): appending right after startSession
-    // crashed on-device (step marker "写视频标记", 2026-10-26).
+    liveDebugMark("建元数据组")
+    // Timed metadata groups, created upfront; appended in the
+    // metadata input's ready callback, registered only after
+    // the session starts (see below).
     func metadataItem(key: String, value: any NSCopying & NSObjectProtocol) -> AVMutableMetadataItem {
         let item = AVMutableMetadataItem()
         item.keySpace = .quickTimeMetadata
@@ -275,13 +285,6 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
     )
     let writingQueue = DispatchQueue(label: "livephoto.writer")
     let metadataState = MetadataAppendState()
-    metadataInput.requestMediaDataWhenReady(on: writingQueue) {
-        guard !metadataState.appended, metadataInput.isReadyForMoreMediaData else { return }
-        metadataState.appended = true
-        _ = metadataAdaptor.append(identifierGroup)
-        _ = metadataAdaptor.append(stillGroup)
-        metadataInput.markAsFinished()
-    }
     liveDebugMark("开始读取")
     guard reader.startReading() else {
         throw LivePhotoError.writerFailed
@@ -291,6 +294,18 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
     writer.startSession(atSourceTime: .zero)
     guard writer.status == .writing else {
         throw writer.error ?? LivePhotoError.writerFailed
+    }
+    // Register the metadata callback only now that the session
+    // is running: registering it before startSession let it fire
+    // before the session existed, and appending then crashed
+    // on-device (step marker "加写入输入", 2026-10-26 19:43).
+    liveDebugMark("注册元数据回调")
+    metadataInput.requestMediaDataWhenReady(on: writingQueue) {
+        guard writer.status == .writing, !metadataState.appended, metadataInput.isReadyForMoreMediaData else { return }
+        metadataState.appended = true
+        _ = metadataAdaptor.append(identifierGroup)
+        _ = metadataAdaptor.append(stillGroup)
+        metadataInput.markAsFinished()
     }
     liveDebugMark("泵送视频")
     return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
