@@ -296,7 +296,7 @@ struct DownloadRootView: View {
                 return
             }
             let videoFile = try await downloadFile(from: item.videoURL)
-            try await saveLivePhoto(photoData: jpegData, videoURL: videoFile)
+            try await saveLivePhotoPair(photoData: jpegData, videoURL: videoFile)
             showToast("已保存为 Live Photo，去相册长按播放")
         } catch {
             showToast("保存失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
