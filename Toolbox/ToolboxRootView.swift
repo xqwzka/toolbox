@@ -1,15 +1,17 @@
 import SwiftUI
 
-/// The three functions in one app. Each keeps its own UI intact:
+/// The five functions in one app. Each keeps its own UI intact:
 /// 记账 keeps its 明细/图表 shell, 卡密 keeps its list, 网页 keeps
-/// its import list + viewer. Switching happens only here: the
-/// floating button opens the switch page. There is no system tab
-/// bar, so no function ever shows two stacked bars.
+/// its import list + viewer, 代理规则 keeps its config list +
+/// editor + output. Switching happens only here: the floating
+/// button opens the switch page. There is no system tab bar,
+/// so no function ever shows two stacked bars.
 enum ToolboxTab: String, CaseIterable {
     case ledger = "记账"
     case cardcodes = "卡密"
     case web = "网页"
     case download = "下载"
+    case proxy = "代理规则"
 }
 
 struct ToolboxRootView: View {
@@ -30,6 +32,8 @@ struct ToolboxRootView: View {
                     WebRootView()
                 case .download:
                     DownloadRootView()
+                case .proxy:
+                    ProxyRootView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -127,6 +131,15 @@ struct SwitcherView: View {
                         isCurrent: current == .download
                     ) {
                         onSelect(.download)
+                    }
+                    SwitcherRow(
+                        icon: "globe",
+                        color: .green,
+                        title: "代理规则",
+                        subtitle: "代理规则 · Clash / Shadowrocket 生成",
+                        isCurrent: current == .proxy
+                    ) {
+                        onSelect(.proxy)
                     }
                 }
                 .padding(.horizontal, 16)
