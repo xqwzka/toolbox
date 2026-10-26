@@ -70,7 +70,7 @@ struct ProxyRootView: View {
                 Button("创建") {
                     let name = newName.trimmingCharacters(in: .whitespaces)
                     guard !name.isEmpty else { return }
-                    let config = ProxyConfig(name: name, payload: proxyEncodeConfig(blankProxyConfig()))
+                    let config = ProxyConfig(name: name, payload: proxyEncodeDualConfig(ProxyDualConfig()))
                     modelContext.insert(config)
                 }
             }
@@ -97,7 +97,7 @@ struct ProxyRootView: View {
     private func seedIfNeeded() {
         guard configs.isEmpty else { return }
         for seed in makeProxySeedConfigs() {
-            modelContext.insert(ProxyConfig(name: seed.name, payload: proxyEncodeConfig(seed.data)))
+            modelContext.insert(ProxyConfig(name: seed.name, payload: proxyEncodeDualConfig(seed.data)))
         }
     }
 
@@ -111,7 +111,8 @@ private struct ProxyConfigRow: View {
     let config: ProxyConfig
 
     var body: some View {
-        let data = proxyDecodeConfig(config.payload)
+        let dual = proxyDecodeDualConfig(config.payload)
+        let data = dual.software == .shadowrocket ? dual.shadowrocket : dual.clash
         VStack(alignment: .leading, spacing: 4) {
             Text(config.name)
                 .font(.headline)

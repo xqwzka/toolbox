@@ -409,6 +409,9 @@ private func proxyDialerSuggestions(draft: ConfigData, excluding name: String) -
 struct ProxyProviderSheet: View {
     @Binding var draft: ConfigData
     let existing: ProxyProvider?
+    /// Shadowrocket providers have no behavior field — the
+    /// generator only reads url + policy for .conf output.
+    let shadowrocket: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
     @State private var policy: String
@@ -416,9 +419,10 @@ struct ProxyProviderSheet: View {
     @State private var url: String
     @State private var error = ""
 
-    init(draft: Binding<ConfigData>, existing: ProxyProvider?) {
+    init(draft: Binding<ConfigData>, existing: ProxyProvider?, shadowrocket: Bool = false) {
         _draft = draft
         self.existing = existing
+        self.shadowrocket = shadowrocket
         _name = State(initialValue: existing?.name ?? "")
         _policy = State(initialValue: existing?.policy ?? "Proxy")
         _behavior = State(initialValue: existing?.behavior ?? "classical")
@@ -434,12 +438,14 @@ struct ProxyProviderSheet: View {
                         Text(p).tag(p)
                     }
                 }
-                Picker("行为 behavior", selection: $behavior) {
-                    Text("classical").tag("classical")
-                    Text("domain").tag("domain")
-                    Text("ipcidr").tag("ipcidr")
+                if !shadowrocket {
+                    Picker("行为 behavior", selection: $behavior) {
+                        Text("classical").tag("classical")
+                        Text("domain").tag("domain")
+                        Text("ipcidr").tag("ipcidr")
+                    }
                 }
-                TextField("Clash / Mihomo YAML URL", text: $url)
+                TextField(shadowrocket ? "Shadowrocket .list URL" : "Clash / Mihomo YAML URL", text: $url)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                 if !error.isEmpty {
@@ -489,6 +495,10 @@ struct ProxyProviderSheet: View {
 
 struct ProxyRepoSearchView: View {
     @Binding var config: ConfigData
+    /// Which software's catalog entries to add: Shadowrocket
+    /// gets rule/Shadowrocket/<slug>/<slug>.list, Clash gets
+    /// rule/Clash/<slug>/<slug>.yaml — never mixed.
+    let shadowrocket: Bool
     @State private var query = ""
     @State private var addPolicy = "Proxy"
 
@@ -500,6 +510,9 @@ struct ProxyRepoSearchView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("搜索 ios_rule_script")
                 .font(.subheadline)
+            Text(shadowrocket ? "按服务名、中文别名或分类查找 Shadowrocket .list 规则集。" : "按服务名、中文别名或分类查找 Clash YAML 规则集。")
+                .font(.caption)
+                .foregroundColor(.gray)
             TextField("例如 OpenAI、Netflix、贴吧、广告", text: $query)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
@@ -515,7 +528,7 @@ struct ProxyRepoSearchView: View {
                     .foregroundColor(.gray)
             } else {
                 ForEach(results, id: \.slug) { item in
-                    let added = config.providers.contains { $0.name == item.slug || $0.url == proxyRepoRuleURL(item.slug, shadowrocket: false) }
+                    let added = config.providers.contains { $0.name == item.slug || $0.url == proxyRepoRuleURL(item.slug, shadowrocket: shadowrocket) }
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(item.slug).font(.subheadline)
@@ -528,7 +541,7 @@ struct ProxyRepoSearchView: View {
                             guard !added else { return }
                             config.providers.append(ProxyProvider(
                                 id: newProxyID(), key: "", name: item.slug,
-                                url: proxyRepoRuleURL(item.slug, shadowrocket: false),
+                                url: proxyRepoRuleURL(item.slug, shadowrocket: shadowrocket),
                                 behavior: "classical", policy: addPolicy
                             ))
                         }

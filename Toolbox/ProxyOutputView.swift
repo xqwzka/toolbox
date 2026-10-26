@@ -2,49 +2,45 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// Output screen: Clash YAML and Shadowrocket .conf previews
-/// generated from the editor draft, with copy, share-as-file,
-/// and YAML import (paste or file — via a UIKit document
-/// picker, since SwiftUI.fileImporter never completes on the
-/// user's device). Import replaces the whole draft after a
-/// confirmation alert.
+/// Output screen for the software selected at the top of the
+/// editor — no format switch here anymore. Shows that side's
+/// generated config with copy, share-as-file, and YAML import
+/// (paste or file — via a UIKit document picker, since
+/// SwiftUI.fileImporter never completes on the user's device).
+/// Import always writes to the Clash side, like the page:
+/// the Shadowrocket side is left untouched.
 struct ProxyOutputView: View {
     @Binding var draft: ConfigData
+    let software: ProxySoftware
     let configName: String
+    let onImportClash: (ConfigData) -> Void
 
-    @State private var kind = 0
     @State private var clashFilename = "clash-config"
     @State private var srFilename = "shadowrocket-config"
     @State private var shareItems: [Any]?
     @State private var showingImport = false
     @State private var copied = false
 
-    private var clash: ProxyGeneratedOutput { proxyGenerateClash(draft) }
-    private var shadowrocket: ProxyGeneratedOutput { proxyGenerateShadowrocket(draft) }
+    private var generated: ProxyGeneratedOutput {
+        software == .shadowrocket ? proxyGenerateShadowrocket(draft) : proxyGenerateClash(draft)
+    }
 
-    private var activeText: String { kind == 0 ? clash.text : shadowrocket.text }
-    private var activeWarnings: [String] { kind == 0 ? clash.warnings : shadowrocket.warnings }
-    private var activeFilename: String { kind == 0 ? clashFilename : srFilename }
-    private var activeExtension: String { kind == 0 ? "yaml" : "conf" }
+    private var activeText: String { generated.text }
+    private var activeWarnings: [String] { generated.warnings }
+    private var activeFilename: String { software == .shadowrocket ? srFilename : clashFilename }
+    private var activeExtension: String { software == .shadowrocket ? "conf" : "yaml" }
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("输出格式", selection: $kind) {
-                Text("Clash YAML").tag(0)
-                Text("Shadowrocket").tag(1)
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-
             HStack {
-                TextField("文件名", text: kind == 0 ? $clashFilename : $srFilename)
+                TextField("文件名", text: software == .shadowrocket ? $srFilename : $clashFilename)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                 Text(".\(activeExtension)")
                     .foregroundColor(.gray)
             }
             .padding(.horizontal)
+            .padding(.vertical, 8)
 
             if !activeWarnings.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
@@ -80,7 +76,7 @@ struct ProxyOutputView: View {
             }
             .padding()
         }
-        .navigationTitle(configName + " · 生成结果")
+        .navigationTitle(configName + " · " + (software == .shadowrocket ? "Shadowrocket 配置预览" : "Clash / Mihomo 配置预览"))
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: Binding(
             get: { shareItems != nil },
@@ -92,7 +88,7 @@ struct ProxyOutputView: View {
         }
         .sheet(isPresented: $showingImport) {
             ProxyImportSheet { imported in
-                draft = imported
+                onImportClash(imported)
                 showingImport = false
             }
         }
@@ -103,7 +99,7 @@ struct ProxyOutputView: View {
 
     private func share() {
         let base = activeFilename.trimmingCharacters(in: .whitespaces)
-        let name = base.isEmpty ? (kind == 0 ? "clash-config" : "shadowrocket-config") : base
+        let name = base.isEmpty ? (software == .shadowrocket ? "shadowrocket-config" : "clash-config") : base
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(name)
             .appendingPathExtension(activeExtension)
@@ -131,7 +127,7 @@ private struct ProxyImportSheet: View {
                     .frame(minHeight: 300)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                Text("粘贴 Clash YAML，或从文件选择。解析后需确认才会替换当前配置；节点不写回订阅，改为单个节点。")
+                Text("粘贴 Clash YAML，或从文件选择。解析后需确认才会替换 Clash 配置；Shadowrocket 配置不会改变。节点不写回订阅，改为单个节点。")
                     .font(.caption)
                     .foregroundColor(.gray)
                 if !importError.isEmpty {
@@ -158,7 +154,7 @@ private struct ProxyImportSheet: View {
                     parseImport(importText)
                 }
             }
-            .alert("确认替换当前配置？", isPresented: Binding(
+            .alert("确认替换 Clash 配置？", isPresented: Binding(
                 get: { pendingImport != nil },
                 set: { if !$0 { pendingImport = nil } }
             )) {

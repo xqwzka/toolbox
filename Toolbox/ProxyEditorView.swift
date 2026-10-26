@@ -8,7 +8,13 @@ import SwiftData
 struct ProxyEditorView: View {
     @Environment(\.modelContext) private var modelContext
     let config: ProxyConfig
+    /// The side currently being edited. The other side lives in
+    /// its own draft and is flushed back on switch and on save,
+    /// so the two softwares never share rules.
     @State private var draft: ConfigData
+    @State private var clashDraft: ConfigData
+    @State private var srDraft: ConfigData
+    @State private var software: ProxySoftware
     @State private var savedNote = false
 
     @State private var editingSubscription: ProxySubscription?
@@ -25,11 +31,32 @@ struct ProxyEditorView: View {
 
     init(config: ProxyConfig) {
         self.config = config
-        _draft = State(initialValue: config.decoded)
+        let dual = config.decoded
+        _clashDraft = State(initialValue: dual.clash)
+        _srDraft = State(initialValue: dual.shadowrocket)
+        _software = State(initialValue: dual.software)
+        _draft = State(initialValue: dual.software == .shadowrocket ? dual.shadowrocket : dual.clash)
     }
 
     var body: some View {
         Form {
+            Section {
+                Picker("代理软件", selection: $software) {
+                    Text("Clash / Mihomo").tag(ProxySoftware.clash)
+                    Text("Shadowrocket").tag(ProxySoftware.shadowrocket)
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: software) { old, new in
+                    if old == .shadowrocket { srDraft = draft } else { clashDraft = draft }
+                    draft = new == .shadowrocket ? srDraft : clashDraft
+                }
+                Text(software == .shadowrocket
+                    ? "正在编辑 Shadowrocket 专用规则；在线规则集使用 .list，配置与 Clash / Mihomo 完全独立。"
+                    : "正在编辑 Clash / Mihomo 专用规则；在线规则集使用 YAML，配置与 Shadowrocket 完全独立。")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+
             Section("节点") {
                 if draft.subscriptions.isEmpty && draft.nodeLinks.isEmpty {
                     Text("还没有节点来源。可添加机场订阅，或单个 ss / vmess / trojan / vless / hysteria2 链接。")
@@ -86,16 +113,20 @@ struct ProxyEditorView: View {
             }
 
             Section("规则集") {
-                ProxyRepoSearchView(config: $draft)
+                ProxyRepoSearchView(config: $draft, shadowrocket: software == .shadowrocket)
                 if draft.providers.isEmpty {
-                    Text("暂无在线规则集。添加后会生成 rule-providers 与 RULE-SET 引用。")
+                    Text(software == .shadowrocket
+                        ? "暂无 Shadowrocket 在线规则集。添加后会生成 .conf 中的 RULE-SET 引用。"
+                        : "暂无在线规则集。添加后会生成 rule-providers 与 RULE-SET 引用。")
                         .font(.caption)
                         .foregroundColor(.gray)
                 }
                 ForEach(draft.providers) { provider in
                     ProxyEditorRow(
                         title: provider.name,
-                        subtitle: "RULE-SET · \(provider.behavior) · \(provider.policy)",
+                        subtitle: software == .shadowrocket
+                            ? "RULE-SET · \(provider.policy)"
+                            : "RULE-SET · \(provider.behavior) · \(provider.policy)",
                         onEdit: { editingProvider = provider },
                         onUp: { move(&draft.providers, id: provider.id, delta: -1) },
                         onDown: { move(&draft.providers, id: provider.id, delta: 1) },
@@ -157,7 +188,10 @@ struct ProxyEditorView: View {
             }
         }
         .navigationDestination(isPresented: $showingOutput) {
-            ProxyOutputView(draft: $draft, configName: config.name)
+            ProxyOutputView(draft: $draft, software: software, configName: config.name, onImportClash: { imported in
+                clashDraft = imported
+                if software == .clash { draft = imported }
+            })
         }
         .onDisappear(perform: save)
         .sheet(isPresented: $addingSubscription) {
@@ -179,10 +213,10 @@ struct ProxyEditorView: View {
             ProxyStrategySheet(draft: $draft, existing: group)
         }
         .sheet(isPresented: $addingProvider) {
-            ProxyProviderSheet(draft: $draft, existing: nil)
+            ProxyProviderSheet(draft: $draft, existing: nil, shadowrocket: software == .shadowrocket)
         }
         .sheet(item: $editingProvider) { provider in
-            ProxyProviderSheet(draft: $draft, existing: provider)
+            ProxyProviderSheet(draft: $draft, existing: provider, shadowrocket: software == .shadowrocket)
         }
         .sheet(item: $editingRule) { rule in
             ProxyRuleSheet(draft: $draft, existing: rule)
@@ -196,7 +230,9 @@ struct ProxyEditorView: View {
     }
 
     private func save() {
-        config.payload = proxyEncodeConfig(draft)
+        if software == .shadowrocket { srDraft = draft } else { clashDraft = draft }
+        config.payload = proxyEncodeDualConfig(ProxyDualConfig(
+            clash: clashDraft, shadowrocket: srDraft, software: software))
         config.updatedAt = Date()
         try? modelContext.save()
     }

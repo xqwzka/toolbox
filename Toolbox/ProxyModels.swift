@@ -266,3 +266,47 @@ func proxyEncodeConfig(_ config: ConfigData) -> Data {
 func proxyDecodeConfig(_ data: Data) -> ConfigData {
     (try? JSONDecoder().decode(ConfigData.self, from: data)) ?? blankProxyConfig()
 }
+
+// MARK: - Dual-software config (web-page parity)
+
+/// Which software the editor is currently editing. The page
+/// keeps Clash / Mihomo and Shadowrocket as two fully
+/// independent configs under one name; the native app does
+/// the same, so a .list provider can never leak into a YAML
+/// output or vice versa.
+enum ProxySoftware: String, Codable {
+    case clash
+    case shadowrocket
+
+    var title: String {
+        self == .shadowrocket ? "Shadowrocket" : "Clash / Mihomo"
+    }
+}
+
+struct ProxyDualConfig: Codable {
+    var clash: ConfigData
+    var shadowrocket: ConfigData
+    var software: ProxySoftware
+
+    init(clash: ConfigData = blankProxyConfig(),
+         shadowrocket: ConfigData = blankProxyConfig(),
+         software: ProxySoftware = .clash) {
+        self.clash = clash
+        self.shadowrocket = shadowrocket
+        self.software = software
+    }
+}
+
+func proxyEncodeDualConfig(_ dual: ProxyDualConfig) -> Data {
+    (try? JSONEncoder().encode(dual)) ?? Data()
+}
+
+/// New dual payload first; legacy single-ConfigData payloads
+/// (from the first native build) become the Clash side, with
+/// an empty Shadowrocket side.
+func proxyDecodeDualConfig(_ data: Data) -> ProxyDualConfig {
+    if let dual = try? JSONDecoder().decode(ProxyDualConfig.self, from: data) {
+        return dual
+    }
+    return ProxyDualConfig(clash: proxyDecodeConfig(data))
+}
