@@ -23,6 +23,45 @@ import UniformTypeIdentifiers
 /// build passed the still time as NSValue(time:) and the app
 /// crashed when converting, so that form is not used again.
 
+// MARK: - Crash-step diagnostics
+//
+// The metadata build crashes on-device instead of throwing, so
+// each step of the pair path writes a marker to a file in
+// Documents (which survives a crash). After a crash, relaunch
+// the app and the download screen shows the last marker —
+// that is the step that crashed. Markers are written BEFORE
+// each step, so the last line names the crashing step. All
+// writes are best-effort (try?) so a marker can never crash
+// the app itself.
+private func liveDebugURL() -> URL {
+    let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        ?? FileManager.default.temporaryDirectory
+    return base.appendingPathComponent("livephoto-debug.txt")
+}
+
+func liveDebugClear() {
+    try? "".write(to: liveDebugURL(), atomically: true, encoding: .utf8)
+}
+
+func liveDebugMark(_ step: String) {
+    let line = step + "\n"
+    let url = liveDebugURL()
+    if let handle = try? FileHandle(forWritingTo: url) {
+        defer { try? handle.close() }
+        handle.seekToEndOfFile()
+        if let data = line.data(using: .utf8) {
+            handle.write(data)
+        }
+    } else {
+        try? line.write(to: url, atomically: true, encoding: .utf8)
+    }
+}
+
+func liveDebugLastLine() -> String {
+    guard let text = try? String(contentsOf: liveDebugURL(), encoding: .utf8) else { return "" }
+    return text.split(separator: "\n").last.map(String.init) ?? ""
+}
+
 enum LivePhotoError: Error, LocalizedError {
     case noVideoTrack
     case exportFailed
@@ -50,12 +89,16 @@ enum LivePhotoError: Error, LocalizedError {
 }
 
 func convertVideoToLivePhoto(sourceURL: URL, start: Double, duration: Double) async throws {
+    liveDebugClear()
+    liveDebugMark("开始裁剪")
     let asset = AVURLAsset(url: sourceURL)
     let sourceDuration = try await asset.load(.duration).seconds
     let safeStart = min(max(0, start), max(0, sourceDuration - 0.1))
     let safeDuration = min(duration, 3.0, max(0.1, sourceDuration - safeStart))
     let trimmed = try await trimVideo(sourceURL: sourceURL, start: safeStart, duration: safeDuration)
+    liveDebugMark("裁剪完成，截取静态图")
     let stillData = try extractStillFrame(videoURL: trimmed, at: safeDuration / 2)
+    liveDebugMark("静态图完成，开始配对")
     try await saveLivePhotoPair(photoData: stillData, videoURL: trimmed)
 }
 
@@ -109,16 +152,21 @@ private func extractStillFrame(videoURL: URL, at seconds: Double) throws -> Data
 /// middle frame for converted clips; for Douyin live photos the
 /// cover is the still and the middle is a close-enough seam).
 func saveLivePhotoPair(photoData: Data, videoURL: URL) async throws {
+    liveDebugMark("读视频时长")
     let asset = AVURLAsset(url: videoURL)
     let duration = try await asset.load(.duration).seconds
     let identifier = UUID().uuidString
+    liveDebugMark("写照片标识")
     let photo = embedContentIdentifier(jpegData: photoData, identifier: identifier)
+    liveDebugMark("写视频标记")
     let video = try await addLivePhotoMetadata(
         videoURL: videoURL,
         stillTime: CMTime(seconds: duration / 2, preferredTimescale: 600),
         identifier: identifier
     )
+    liveDebugMark("保存到相册")
     try await saveLivePhoto(photoData: photo, videoURL: video)
+    liveDebugMark("完成")
 }
 
 /// Embed the pairing identifier in the JPEG's MakerApple
