@@ -19,9 +19,10 @@ import UniformTypeIdentifiers
 /// the metadata — the same content identifier in the video's
 /// QuickTime metadata track (content-identifier +
 /// still-image-time) and in the JPEG's MakerApple dictionary
-/// (key "17"). Metadata values are plain strings: an earlier
-/// build passed the still time as NSValue(time:) and the app
-/// crashed when converting, so that form is not used again.
+/// (key "17"). The video still-image-time is an NSNumber
+/// (seconds): NSValue(time:) and NSString forms both crashed
+/// on-device, and the metadata groups are appended only when
+/// the metadata input reports itself ready.
 
 // MARK: - Crash-step diagnostics
 //
@@ -60,6 +61,12 @@ func liveDebugMark(_ step: String) {
 func liveDebugLastLine() -> String {
     guard let text = try? String(contentsOf: liveDebugURL(), encoding: .utf8) else { return "" }
     return text.split(separator: "\n").last.map(String.init) ?? ""
+}
+
+/// Serial-queue flag for the metadata append callback (both the
+/// callback and the pump completion run on the writer queue).
+private final class MetadataAppendState: @unchecked Sendable {
+    var appended = false
 }
 
 enum LivePhotoError: Error, LocalizedError {
@@ -195,8 +202,12 @@ private func embedContentIdentifier(jpegData: Data, identifier: String) -> Data 
 /// Re-mux the clip with a QuickTime metadata track:
 /// content-identifier at time zero, still-image-time at the still
 /// frame. Video and audio tracks pass through untouched (nil
-/// output settings). Values are plain strings only.
+/// output settings). still-image-time is an NSNumber (seconds).
+/// Metadata groups are appended only when the metadata input
+/// reports itself ready: appending right after startSession
+/// crashed on-device (step marker "写视频标记", 2026-10-26).
 private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: String) async throws -> URL {
+    liveDebugMark("读轨道")
     let asset = AVURLAsset(url: videoURL)
     guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
         throw LivePhotoError.noVideoTrack
@@ -206,6 +217,7 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
     guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .mov) else {
         throw LivePhotoError.writerFailed
     }
+    liveDebugMark("加写入输入")
     let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil)
     videoInput.expectsMediaDataInRealTime = false
     var audioInput: AVAssetWriterInput?
@@ -239,32 +251,48 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
         reader.add(output)
         audioOutput = output
     }
+    // Timed metadata groups, created upfront but appended only
+    // when the metadata input reports itself ready (the
+    // documented pattern): appending right after startSession
+    // crashed on-device (step marker "写视频标记", 2026-10-26).
+    func metadataItem(key: String, value: NSObject) -> AVMutableMetadataItem {
+        let item = AVMutableMetadataItem()
+        item.keySpace = .quickTimeMetadata
+        item.key = key as NSString
+        item.value = value
+        return item
+    }
+    let identifierGroup = AVTimedMetadataGroup(
+        items: [metadataItem(key: "com.apple.quicktime.content-identifier", value: identifier as NSString)],
+        timeRange: CMTimeRange(start: .zero, duration: CMTime(seconds: 0.1, preferredTimescale: 600))
+    )
+    // still-image-time is numeric (NSNumber seconds): the two
+    // earlier value forms (NSValue(time:) and NSString) both
+    // crashed on-device.
+    let stillGroup = AVTimedMetadataGroup(
+        items: [metadataItem(key: "com.apple.quicktime.still-image-time", value: NSNumber(value: stillTime.seconds))],
+        timeRange: CMTimeRange(start: stillTime, duration: CMTime(seconds: 0.1, preferredTimescale: 600))
+    )
+    let writingQueue = DispatchQueue(label: "livephoto.writer")
+    let metadataState = MetadataAppendState()
+    metadataInput.requestMediaDataWhenReady(on: writingQueue) {
+        guard !metadataState.appended, metadataInput.isReadyForMoreMediaData else { return }
+        metadataState.appended = true
+        _ = metadataAdaptor.append(identifierGroup)
+        _ = metadataAdaptor.append(stillGroup)
+        metadataInput.markAsFinished()
+    }
+    liveDebugMark("开始读取")
     guard reader.startReading() else {
         throw LivePhotoError.writerFailed
     }
+    liveDebugMark("开始会话")
     writer.startWriting()
     writer.startSession(atSourceTime: .zero)
     guard writer.status == .writing else {
         throw writer.error ?? LivePhotoError.writerFailed
     }
-    func metadataItem(key: String, value: String) -> AVMutableMetadataItem {
-        let item = AVMutableMetadataItem()
-        item.keySpace = .quickTimeMetadata
-        item.key = key as NSString
-        item.value = value as NSString
-        return item
-    }
-    let identifierGroup = AVTimedMetadataGroup(
-        items: [metadataItem(key: "com.apple.quicktime.content-identifier", value: identifier)],
-        timeRange: CMTimeRange(start: .zero, duration: CMTime(seconds: 0.1, preferredTimescale: 600))
-    )
-    let stillGroup = AVTimedMetadataGroup(
-        items: [metadataItem(key: "com.apple.quicktime.still-image-time", value: String(stillTime.seconds))],
-        timeRange: CMTimeRange(start: stillTime, duration: CMTime(seconds: 0.1, preferredTimescale: 600))
-    )
-    _ = metadataAdaptor.append(identifierGroup)
-    _ = metadataAdaptor.append(stillGroup)
-    let writingQueue = DispatchQueue(label: "livephoto.writer")
+    liveDebugMark("泵送视频")
     return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
         let group = DispatchGroup()
         group.enter()
@@ -293,12 +321,17 @@ private func addLivePhotoMetadata(videoURL: URL, stillTime: CMTime, identifier: 
         }
         group.notify(queue: writingQueue) {
             if reader.status == .failed {
+                writer.cancelWriting()
                 continuation.resume(throwing: reader.error ?? LivePhotoError.writerFailed)
                 return
             }
-            metadataInput.markAsFinished()
+            if !metadataState.appended {
+                metadataInput.markAsFinished()
+            }
+            liveDebugMark("完成写入")
             writer.finishWriting {
                 if writer.status == .completed {
+                    liveDebugMark("视频标记完成")
                     continuation.resume(returning: outputURL)
                 } else {
                     continuation.resume(throwing: writer.error ?? LivePhotoError.writerFailed)
