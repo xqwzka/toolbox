@@ -17,6 +17,9 @@ struct RecordFormView: View {
     @State private var date: Date
     @State private var note: String
     @State private var showDatePicker = false
+    @State private var currency: String
+    @State private var rateText: String
+    @State private var rateMessage: String?
 
     init(record: LedgerRecord?) {
         self.record = record
@@ -25,6 +28,8 @@ struct RecordFormView: View {
         _category = State(initialValue: record?.category ?? "餐饮")
         _date = State(initialValue: record?.date ?? Date())
         _note = State(initialValue: record?.note ?? "")
+        _currency = State(initialValue: record?.currency ?? "CNY")
+        _rateText = State(initialValue: RecordFormView.editingRateText(for: record))
     }
 
     private static func editingAmountText(for record: LedgerRecord?) -> String {
@@ -35,12 +40,32 @@ struct RecordFormView: View {
         return text
     }
 
+    /// Editing a USD row reloads its locked rate; a new row (or a
+    /// CNY row) starts from the last used rate, default 7.2.
+    private static func editingRateText(for record: LedgerRecord?) -> String {
+        if let rate = record?.exchangeRate, rate > 0 {
+            return String(format: "%.4f", rate)
+        }
+        let saved = UserDefaults.standard.double(forKey: "ledgerUSDRate")
+        return String(format: "%.2f", saved > 0 ? saved : 7.2)
+    }
+
     private var categories: [String] {
         isIncome ? AppCategories.income : AppCategories.expense
     }
 
     private var amount: Double {
         Double(amountText) ?? 0
+    }
+
+    private var rate: Double {
+        Double(rateText) ?? 0
+    }
+
+    /// Live RMB preview under the big amount when paying in USD.
+    private var convertedText: String? {
+        guard currency == "USD", amount > 0, rate > 0 else { return nil }
+        return "≈ " + formatMoney(amount * rate)
     }
 
     private var displayAmount: String {
@@ -56,6 +81,8 @@ struct RecordFormView: View {
             EntryHeaderView(
                 isIncome: $isIncome,
                 displayAmount: displayAmount,
+                currencySymbol: currency == "USD" ? "$" : "¥",
+                convertedText: convertedText,
                 date: $date,
                 dateTitle: dateButtonTitle,
                 showDatePicker: $showDatePicker,
@@ -63,6 +90,12 @@ struct RecordFormView: View {
             )
             ScrollView {
                 VStack(spacing: 16) {
+                    CurrencySectionView(
+                        currency: $currency,
+                        rateText: $rateText,
+                        rateMessage: rateMessage,
+                        onRefreshRate: refreshRate
+                    )
                     CategoryGridView(categories: categories, selected: $category)
                     NoteRowView(note: $note)
                     if record != nil {
@@ -124,12 +157,18 @@ struct RecordFormView: View {
 
     private func save() {
         guard amount > 0 else { return }
+        let savedRate: Double? = currency == "USD" && rate > 0 ? rate : nil
+        if let savedRate {
+            UserDefaults.standard.set(savedRate, forKey: "ledgerUSDRate")
+        }
         if let record {
             record.amount = amount
             record.isIncome = isIncome
             record.category = category
             record.date = date
             record.note = note
+            record.currency = currency
+            record.exchangeRate = savedRate
         } else {
             context.insert(
                 LedgerRecord(
@@ -137,11 +176,36 @@ struct RecordFormView: View {
                     isIncome: isIncome,
                     category: category,
                     date: date,
-                    note: note
+                    note: note,
+                    currency: currency,
+                    exchangeRate: savedRate
                 )
             )
         }
         dismiss()
+    }
+
+    /// Free no-key endpoint (open.er-api.com). On failure the
+    /// current rate stays untouched and a note explains why.
+    private func refreshRate() {
+        rateMessage = "更新中…"
+        guard let url = URL(string: "https://open.er-api.com/v6/latest/USD") else { return }
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            guard let data,
+                  let decoded = try? JSONDecoder().decode(ExchangeRateResponse.self, from: data),
+                  let cny = decoded.rates["CNY"], cny > 0 else {
+                DispatchQueue.main.async { rateMessage = "更新失败，沿用当前汇率" }
+                return
+            }
+            DispatchQueue.main.async {
+                rateText = String(format: "%.4f", cny)
+                rateMessage = "已更新为实时汇率"
+            }
+        }.resume()
+    }
+
+    private struct ExchangeRateResponse: Decodable {
+        let rates: [String: Double]
     }
 }
 
@@ -181,6 +245,8 @@ private struct ToggleItem: View {
 private struct EntryHeaderView: View {
     @Binding var isIncome: Bool
     let displayAmount: String
+    let currencySymbol: String
+    let convertedText: String?
     @Binding var date: Date
     let dateTitle: String
     @Binding var showDatePicker: Bool
@@ -196,7 +262,7 @@ private struct EntryHeaderView: View {
                     .foregroundColor(.black)
             }
             HStack {
-                Text("¥" + displayAmount)
+                Text(currencySymbol + displayAmount)
                     .font(.system(size: 38, weight: .bold))
                     .foregroundColor(.black)
                     .lineLimit(1)
@@ -214,6 +280,12 @@ private struct EntryHeaderView: View {
                     .background(Color.white)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
+            }
+            if let convertedText {
+                Text(convertedText)
+                    .font(.subheadline)
+                    .foregroundColor(.black.opacity(0.7))
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             if showDatePicker {
                 DatePicker("", selection: $date, displayedComponents: .date)
@@ -376,5 +448,61 @@ private struct DigitKeyView: View {
                     .background(Color.white)
             }
         }
+    }
+}
+
+/// Currency row on the entry sheet: a CNY/USD segmented picker.
+/// USD rows show an editable rate (1 USD = x RMB) plus a live-rate
+/// refresh button; the rate is locked into the record on save, so
+/// later rate moves never rewrite history.
+private struct CurrencySectionView: View {
+    @Binding var currency: String
+    @Binding var rateText: String
+    let rateMessage: String?
+    let onRefreshRate: () -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Picker("货币", selection: $currency) {
+                Text("人民币 ¥").tag("CNY")
+                Text("美元 $").tag("USD")
+            }
+            .pickerStyle(.segmented)
+            if currency == "USD" {
+                HStack(spacing: 8) {
+                    Text("汇率")
+                        .font(.subheadline)
+                        .foregroundColor(.black)
+                    Text("1 美元 =")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                    TextField("7.20", text: $rateText)
+                        .font(.subheadline)
+                        .keyboardType(.decimalPad)
+                        .multilineTextAlignment(.center)
+                        .padding(.vertical, 6)
+                        .background(Color.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                        )
+                    Text("人民币")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                    Button("实时汇率", action: onRefreshRate)
+                        .font(.subheadline)
+                }
+                if let rateMessage {
+                    Text(rateMessage)
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding(12)
+        .background(AppTheme.fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }

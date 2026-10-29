@@ -3,9 +3,12 @@ import SwiftUI
 /// The five functions in one app. Each keeps its own UI intact:
 /// 记账 keeps its 明细/图表 shell, 卡密 keeps its list, 网页 keeps
 /// its import list + viewer, 代理规则 keeps its config list +
-/// editor + output. Switching happens only here: the floating
-/// button opens the switch page. There is no system tab bar,
-/// so no function ever shows two stacked bars.
+/// editor + output. Launch always shows the chooser page
+/// (LauncherView): pick a function to open it directly, no
+/// remembered tab. After that, switching happens here: the
+/// floating button opens the switch page, which also has a
+/// 启动页 row to come back. There is no system tab bar, so no
+/// function ever shows two stacked bars.
 enum ToolboxTab: String, CaseIterable {
     case ledger = "记账"
     case cardcodes = "卡密"
@@ -15,15 +18,38 @@ enum ToolboxTab: String, CaseIterable {
 }
 
 struct ToolboxRootView: View {
-    @State private var tab: ToolboxTab = .ledger
+    /// nil = launch chooser page, no function open yet.
+    @State private var tab: ToolboxTab? = nil
     @State private var showingSwitcher = false
     @State private var floatPosition = CGSize.zero
     @State private var dragTranslation = CGSize.zero
 
     var body: some View {
+        Group {
+            if let selected = tab {
+                featureView(selected)
+            } else {
+                LauncherView { selected in
+                    tab = selected
+                }
+            }
+        }
+        .sheet(isPresented: $showingSwitcher) {
+            SwitcherView(current: tab) { selected in
+                tab = selected
+                showingSwitcher = false
+            }
+            .presentationDetents([.medium])
+        }
+    }
+
+    /// One selected function + the floating switch button. The
+    /// launcher (no selection yet) has no floating button: it
+    /// already is the selection page.
+    private func featureView(_ selected: ToolboxTab) -> some View {
         ZStack(alignment: .bottomTrailing) {
             Group {
-                switch tab {
+                switch selected {
                 case .ledger:
                     LedgerRootView()
                 case .cardcodes:
@@ -75,13 +101,6 @@ struct ToolboxRootView: View {
             // tabs it simply floats a little higher.
             .padding(.bottom, 110)
         }
-        .sheet(isPresented: $showingSwitcher) {
-            SwitcherView(current: tab) { selected in
-                tab = selected
-                showingSwitcher = false
-            }
-            .presentationDetents([.medium])
-        }
     }
 }
 
@@ -89,13 +108,22 @@ struct ToolboxRootView: View {
 /// Plain VStack rows (not a List): the whole row is the button,
 /// so tapping anywhere on a row switches — no dead zones.
 struct SwitcherView: View {
-    let current: ToolboxTab
-    let onSelect: (ToolboxTab) -> Void
+    let current: ToolboxTab?
+    let onSelect: (ToolboxTab?) -> Void
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 12) {
+                    SwitcherRow(
+                        icon: "square.grid.2x2.fill",
+                        color: .orange,
+                        title: "启动页",
+                        subtitle: "回到项目选择页",
+                        isCurrent: current == nil
+                    ) {
+                        onSelect(nil)
+                    }
                     SwitcherRow(
                         icon: "list.bullet",
                         color: AppTheme.yellow,
@@ -209,5 +237,78 @@ extension View {
                 .clipShape(Circle())
                 .shadow(color: Color.black.opacity(0.25), radius: 6, y: 3)
         }
+    }
+}
+
+/// The launch page: pick a function and open it directly. Shown
+/// on every launch (no remembered tab). Once a function is
+/// picked, the floating button takes over switching, and the
+/// switch sheet has a 启动页 row to come back here.
+struct LauncherView: View {
+    let onSelect: (ToolboxTab) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("工具箱")
+                        .font(.largeTitle)
+                        .fontWeight(.bold)
+                    Text("选一个项目，直接打开")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 24)
+                .padding(.bottom, 4)
+                SwitcherRow(
+                    icon: "list.bullet",
+                    color: AppTheme.yellow,
+                    title: "记账",
+                    subtitle: "简记账 · 明细与图表",
+                    isCurrent: false
+                ) {
+                    onSelect(.ledger)
+                }
+                SwitcherRow(
+                    icon: "key.fill",
+                    color: CardTheme.accent,
+                    title: "卡密",
+                    subtitle: "卡密管家 · 点按复制",
+                    isCurrent: false
+                ) {
+                    onSelect(.cardcodes)
+                }
+                SwitcherRow(
+                    icon: "doc.text",
+                    color: .blue,
+                    title: "网页",
+                    subtitle: "本地网页 · 本地 HTML 查看",
+                    isCurrent: false
+                ) {
+                    onSelect(.web)
+                }
+                SwitcherRow(
+                    icon: "arrow.down.circle",
+                    color: .purple,
+                    title: "下载",
+                    subtitle: "视频解析 · 7 个平台",
+                    isCurrent: false
+                ) {
+                    onSelect(.download)
+                }
+                SwitcherRow(
+                    icon: "globe",
+                    color: .green,
+                    title: "代理规则",
+                    subtitle: "代理规则 · Clash / Shadowrocket 生成",
+                    isCurrent: false
+                ) {
+                    onSelect(.proxy)
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+        .background(CardTheme.background.ignoresSafeArea())
     }
 }

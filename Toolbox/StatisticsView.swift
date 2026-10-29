@@ -45,7 +45,7 @@ struct StatisticsView: View {
     }
 
     private var total: Double {
-        periodRecords.reduce(0) { $0 + $1.amount }
+        periodRecords.reduce(0) { $0 + $1.amountCNY }
     }
 
     private var dayCount: Int {
@@ -141,7 +141,7 @@ struct StatisticsView: View {
     private var ranking: [(name: String, total: Double)] {
         let grouped = Dictionary(grouping: periodRecords, by: { $0.category })
         return grouped
-            .map { (name: $0.key, total: $0.value.reduce(0) { $0 + $1.amount }) }
+            .map { (name: $0.key, total: $0.value.reduce(0) { $0 + $1.amountCNY }) }
             .filter { $0.total > 0 }
             .sorted { $0.total > $1.total }
     }

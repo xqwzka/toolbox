@@ -17,11 +17,11 @@ struct HomeView: View {
     }
 
     private var incomeTotal: Double {
-        monthRecords.filter { $0.isIncome }.reduce(0) { $0 + $1.amount }
+        monthRecords.filter { $0.isIncome }.reduce(0) { $0 + $1.amountCNY }
     }
 
     private var expenseTotal: Double {
-        monthRecords.filter { !$0.isIncome }.reduce(0) { $0 + $1.amount }
+        monthRecords.filter { !$0.isIncome }.reduce(0) { $0 + $1.amountCNY }
     }
 
     private var days: [Date] {
@@ -37,8 +37,8 @@ struct HomeView: View {
 
     private func daySummary(on day: Date) -> String {
         let dayRecords = records(on: day)
-        let income = dayRecords.filter { $0.isIncome }.reduce(0) { $0 + $1.amount }
-        let expense = dayRecords.filter { !$0.isIncome }.reduce(0) { $0 + $1.amount }
+        let income = dayRecords.filter { $0.isIncome }.reduce(0) { $0 + $1.amountCNY }
+        let expense = dayRecords.filter { !$0.isIncome }.reduce(0) { $0 + $1.amountCNY }
         if income > 0 && expense > 0 {
             return "收入 \(formatMoney(income)) · 支出 \(formatMoney(expense))"
         } else if income > 0 {
@@ -193,10 +193,17 @@ private struct RecordRow: View {
                 }
             }
             Spacer()
-            Text(amountText)
-                .font(.subheadline)
-                .fontWeight(.semibold)
-                .foregroundColor(amountColor)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(amountText)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(amountColor)
+                if let converted = convertedMoneyText(record) {
+                    Text(converted)
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+            }
         }
         .padding(.vertical, 4)
     }

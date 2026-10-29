@@ -28,7 +28,14 @@ func formatMoney(_ amount: Double) -> String {
 }
 
 func formatSignedMoney(_ record: LedgerRecord) -> String {
-    (record.isIncome ? "+" : "-") + formatMoney(record.amount)
+    (record.isIncome ? "+" : "-") + record.currencySymbol + String(format: "%.2f", record.amount)
+}
+
+/// RMB equivalent line for foreign-currency rows, e.g. "≈¥90.00".
+/// CNY rows return nil: there is nothing to convert.
+func convertedMoneyText(_ record: LedgerRecord) -> String? {
+    guard record.currencyCode == "USD" else { return nil }
+    return "≈" + formatMoney(record.amountCNY)
 }
 
 func shiftMonth(_ date: Date, by months: Int) -> Date {
