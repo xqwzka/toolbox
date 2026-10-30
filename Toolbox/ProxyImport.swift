@@ -470,8 +470,16 @@ func proxyImportedState(_ text: String) throws -> ProxyImportedConfig {
     let doc = try proxyParseYamlSubset(text)
     var result = ConfigData(
         subscriptions: [], nodeLinks: [], strategies: [], providers: [], rules: [],
-        fallback: ProxyFallback(cn: "DIRECT", defaultPolicy: "Proxy")
+        fallback: ProxyFallback(cn: "DIRECT", defaultPolicy: "Proxy"),
+        ipv6: false
     )
+    // A top-level ipv6 key, when present, sets the switch;
+    // absent means Mihomo's own default (off). Our own
+    // generated output always carries the key, so round-trip
+    // through generate -> import preserves the switch.
+    if let flag = doc["ipv6"], case .bool(let enabled) = flag {
+        result.ipv6 = enabled
+    }
     var warnings: [String] = []
     let ruleEntries = proxyExtractRuleEntries(text)
     let subscriptionNames = proxyExtractSectionNames(text, section: "proxy-providers", label: "订阅名称")

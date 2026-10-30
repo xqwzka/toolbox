@@ -57,6 +57,15 @@ struct ProxyEditorView: View {
                     .foregroundColor(.gray)
             }
 
+            Section("通用") {
+                Toggle("IPv6", isOn: $draft.ipv6)
+                Text(software == .shadowrocket
+                    ? "生成时写入 [General] 的 ipv6。"
+                    : "生成时顶层 ipv6 与 DNS ipv6 都跟这个开关。")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+
             Section("节点") {
                 if draft.subscriptions.isEmpty && draft.nodeLinks.isEmpty {
                     Text("还没有节点来源。可添加机场订阅，或单个 ss / vmess / trojan / vless / hysteria2 链接。")

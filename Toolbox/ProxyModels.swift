@@ -72,6 +72,10 @@ struct ConfigData: Codable, Equatable {
     var providers: [ProxyProvider]
     var rules: [ProxyRule]
     var fallback: ProxyFallback
+    /// IPv6 switch, stored per software side. New and legacy
+    /// configs default to on, matching the user's standing
+    /// IPv6-on stance for his Clash setup.
+    var ipv6: Bool
 }
 
 /// Static catalog entries (generated file ProxyCatalog.swift).
@@ -185,6 +189,7 @@ extension ConfigData {
         providers = c.decodeOrDefault([ProxyProvider].self, forKey: .providers, default: [])
         rules = c.decodeOrDefault([ProxyRule].self, forKey: .rules, default: [])
         fallback = c.decodeOrDefault(ProxyFallback.self, forKey: .fallback, default: ProxyFallback(cn: "DIRECT", defaultPolicy: "Proxy"))
+        ipv6 = c.decodeOrDefault(Bool.self, forKey: .ipv6, default: true)
     }
 }
 
@@ -236,7 +241,8 @@ func blankProxyConfig() -> ConfigData {
         strategies: defaultRegionStrategies(),
         providers: [],
         rules: [],
-        fallback: ProxyFallback(cn: "DIRECT", defaultPolicy: "Proxy")
+        fallback: ProxyFallback(cn: "DIRECT", defaultPolicy: "Proxy"),
+        ipv6: true
     )
 }
 

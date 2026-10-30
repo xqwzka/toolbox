@@ -154,7 +154,18 @@ struct ProxyGeneratedOutput {
 }
 
 func proxyGenerateClash(_ config: ConfigData) -> ProxyGeneratedOutput {
-    var out = proxyBaseConfig
+    // The base config hardcodes both IPv6 switches off; the
+    // config's ipv6 toggle rewrites both lines (top-level and
+    // dns), mirroring the two-line ipv6 change in a Clash
+    // config. No fake-ip-range6 is added: that variant is
+    // still an unconfirmed experiment, not a known fix.
+    var out = proxyBaseConfig.map { line -> String in
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("ipv6:") else { return line }
+        let indent = String(line.prefix(while: { $0 == " " }))
+        let comment = indent.isEmpty ? "          # IPV6开关" : ""
+        return "\(indent)ipv6: \(config.ipv6)\(comment)"
+    }
     var warnings: [String] = []
     var parsedNodes: [ParsedProxyNode] = []
     for link in config.nodeLinks {
@@ -391,7 +402,7 @@ func proxyGenerateShadowrocket(_ config: ConfigData) -> ProxyGeneratedOutput {
         "bypass-system = true",
         "skip-proxy = 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, localhost, *.local, captive.apple.com",
         "dns-server = 223.5.5.5, 119.29.29.29",
-        "ipv6 = false",
+        "ipv6 = \(config.ipv6)",
         "",
         "[Proxy]",
     ]
