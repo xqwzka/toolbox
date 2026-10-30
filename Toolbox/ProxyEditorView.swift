@@ -28,6 +28,7 @@ struct ProxyEditorView: View {
     @State private var editingRule: ProxyRule?
     @State private var showingBatch = false
     @State private var showingOutput = false
+    @State private var showingImport = false
 
     init(config: ProxyConfig) {
         self.config = config
@@ -62,6 +63,10 @@ struct ProxyEditorView: View {
                 Text(software == .shadowrocket
                     ? "生成时写入 [General] 的 ipv6。"
                     : "生成时顶层 ipv6 与 DNS ipv6 都跟这个开关。")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+                Button("导入配置") { showingImport = true }
+                Text("粘贴 Clash YAML 或 Shadowrocket .conf，识别格式后替换对应一侧的配置，导入后自动切到那一侧。")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
@@ -200,7 +205,16 @@ struct ProxyEditorView: View {
             ProxyOutputView(draft: $draft, software: software, configName: config.name, onImportClash: { imported in
                 clashDraft = imported
                 if software == .clash { draft = imported }
+            }, onImportShadowrocket: { imported in
+                srDraft = imported
+                if software == .shadowrocket { draft = imported }
             })
+        }
+        .sheet(isPresented: $showingImport) {
+            ProxyImportSheet { imported, side in
+                applyImport(imported, side: side)
+                showingImport = false
+            }
         }
         .onDisappear(perform: save)
         .sheet(isPresented: $addingSubscription) {
@@ -235,6 +249,24 @@ struct ProxyEditorView: View {
         }
         .alert("已保存", isPresented: $savedNote) {
             Button("好", role: .cancel) {}
+        }
+    }
+
+    /// Import replaces one side and switches the editor to
+    /// it, so the imported content is what the user sees.
+    /// The current side's unsaved edits are flushed to its
+    /// own draft first. For a cross-side import, only the
+    /// software is changed here: onChange runs after this
+    /// handler and loads the imported side's draft itself —
+    /// setting draft here too would make that flush copy
+    /// the imported content over the old side's draft.
+    private func applyImport(_ imported: ConfigData, side: ProxySoftware) {
+        if software == .shadowrocket { srDraft = draft } else { clashDraft = draft }
+        if side == .shadowrocket { srDraft = imported } else { clashDraft = imported }
+        if side == software {
+            draft = imported
+        } else {
+            software = side
         }
     }
 

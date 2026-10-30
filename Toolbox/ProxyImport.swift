@@ -606,3 +606,380 @@ func proxyImportedState(_ text: String) throws -> ProxyImportedConfig {
     }
     return ProxyImportedConfig(config: result, warnings: warnings)
 }
+
+// MARK: - Shadowrocket import
+
+/// Format detection for the unified import sheet: a .conf
+/// always carries [Section] headers at line start; Clash
+/// YAML never does.
+func proxyDetectImportFormat(_ text: String) -> ProxySoftware {
+    let markers: Set<String> = ["[General]", "[Proxy]", "[Proxy Group]", "[Rule]", "[Host]"]
+    for row in text.components(separatedBy: .newlines) {
+        if markers.contains(row.trimmingCharacters(in: .whitespaces)) {
+            return .shadowrocket
+        }
+    }
+    return .clash
+}
+
+struct ProxySRLine {
+    var comment: String
+    var text: String
+}
+
+/// Split a .conf into sections. A `#` comment attaches to
+/// the next line in the same section (our own generator
+/// writes `# <provider name>` above RULE-SET lines and
+/// `# CN 国内流量` / `# 默认兜底` above the fallback lines).
+func proxySRSections(_ text: String) -> [String: [ProxySRLine]] {
+    var sections: [String: [ProxySRLine]] = [:]
+    var current = ""
+    var pending = ""
+    for row in text.components(separatedBy: .newlines) {
+        let trimmed = row.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { continue }
+        if trimmed.hasPrefix("#") {
+            pending = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+            continue
+        }
+        if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+            current = String(trimmed.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+            pending = ""
+            continue
+        }
+        guard !current.isEmpty else { continue }
+        sections[current, default: []].append(ProxySRLine(comment: pending, text: trimmed))
+        pending = ""
+    }
+    return sections
+}
+
+/// One [Proxy] line (`name = proto, server, port, k=v, ...`)
+/// converted to a share link the app's node parser accepts.
+/// Values are split on commas; a value containing a comma
+/// cannot round-trip through this format. Unknown keys
+/// (udp-relay, tfo, ...) are ignored.
+func proxySRNodeToLink(_ line: String) -> Result<(name: String, url: String), ProxyImportError> {
+    func fail(_ message: String) -> Result<(name: String, url: String), ProxyImportError> {
+        .failure(ProxyImportError.message(message))
+    }
+    guard let eq = line.firstIndex(of: "=") else {
+        return fail("节点行未导入（缺少 =）：\(line)")
+    }
+    let name = String(line[..<eq]).trimmingCharacters(in: .whitespaces)
+    let displayName = name.isEmpty ? "节点" : name
+    let rest = String(line[line.index(after: eq)...])
+    let parts = rest.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+    guard parts.count >= 3 else {
+        return fail("节点「\(displayName)」未导入：缺少服务器或端口")
+    }
+    let proto = parts[0].lowercased()
+    let server = parts[1]
+    let port = Int(parts[2]) ?? 0
+    guard !server.isEmpty && port != 0 else {
+        return fail("节点「\(displayName)」未导入：缺少服务器或端口")
+    }
+    var fields: [String: String] = [:]
+    for item in parts.dropFirst(3) {
+        guard let ieq = item.firstIndex(of: "=") else { continue }
+        let key = String(item[..<ieq]).trimmingCharacters(in: .whitespaces).lowercased()
+        let value = String(item[item.index(after: ieq)...]).trimmingCharacters(in: .whitespaces)
+        fields[key] = value
+    }
+    let host = proxyURLHost(server)
+    switch proto {
+    case "ss":
+        let cipher = fields["encrypt-method"] ?? fields["method"] ?? ""
+        let password = fields["password"] ?? ""
+        return .success((displayName,
+            "ss://" + proxyB64Encode("\(cipher):\(password)") + "@\(host):\(port)#" + proxyPercentEncodeUserInfo(displayName)))
+    case "vmess":
+        let uuid = fields["username"] ?? ""
+        guard !uuid.isEmpty else {
+            return fail("节点「\(displayName)」未导入：缺少 UUID")
+        }
+        var wsHost = fields["ws-host"] ?? ""
+        if let headers = fields["ws-headers"] {
+            if let colon = headers.firstIndex(of: ":") {
+                wsHost = String(headers[headers.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            } else {
+                wsHost = headers
+            }
+        }
+        let mutable: [String: Any] = [
+            "v": "2", "ps": displayName, "add": server, "port": "\(port)", "id": uuid,
+            "aid": "\(Int(fields["alterid"] ?? "0") ?? 0)",
+            "scy": fields["method"] ?? "auto",
+            "net": fields["ws"] == "true" ? "ws" : "tcp", "type": "none",
+            "host": wsHost, "path": fields["ws-path"] ?? "",
+            "tls": fields["tls"] == "true" ? "tls" : "",
+            "sni": fields["server-name"] ?? fields["sni"] ?? "",
+        ]
+        let jsonData = (try? JSONSerialization.data(withJSONObject: mutable)) ?? Data()
+        return .success((displayName, "vmess://" + jsonData.base64EncodedString()))
+    case "trojan":
+        var components = URLComponents()
+        components.scheme = "trojan"
+        components.user = fields["password"] ?? ""
+        components.host = server
+        components.port = port
+        var items: [URLQueryItem] = []
+        let sni = fields["server-name"] ?? fields["sni"] ?? ""
+        if !sni.isEmpty { items.append(URLQueryItem(name: "sni", value: sni)) }
+        if fields["skip-cert-verify"] == "true" { items.append(URLQueryItem(name: "allowInsecure", value: "1")) }
+        if !items.isEmpty { components.queryItems = items }
+        components.fragment = displayName
+        guard let url = components.url?.absoluteString else {
+            return fail("节点「\(displayName)」未导入：无法生成链接")
+        }
+        return .success((displayName, url))
+    case "vless":
+        let uuid = fields["username"] ?? ""
+        guard !uuid.isEmpty else {
+            return fail("节点「\(displayName)」未导入：缺少 UUID")
+        }
+        var components = URLComponents()
+        components.scheme = "vless"
+        components.user = uuid
+        components.host = server
+        components.port = port
+        var items: [URLQueryItem] = []
+        items.append(URLQueryItem(name: "encryption", value: "none"))
+        let isReality = !(fields["reality-public-key"] ?? "").isEmpty
+        if isReality {
+            items.append(URLQueryItem(name: "security", value: "reality"))
+        } else if fields["tls"] == "true" {
+            items.append(URLQueryItem(name: "security", value: "tls"))
+        } else {
+            items.append(URLQueryItem(name: "security", value: "none"))
+        }
+        let ws = fields["ws"] == "true"
+        items.append(URLQueryItem(name: "type", value: ws ? "ws" : "tcp"))
+        let sni = fields["server-name"] ?? fields["sni"] ?? ""
+        if !sni.isEmpty { items.append(URLQueryItem(name: "sni", value: sni)) }
+        if let flow = fields["flow"], !flow.isEmpty { items.append(URLQueryItem(name: "flow", value: flow)) }
+        if ws {
+            if let path = fields["ws-path"], !path.isEmpty { items.append(URLQueryItem(name: "path", value: path)) }
+            var wsHost = fields["ws-host"] ?? ""
+            if let headers = fields["ws-headers"] {
+                if let colon = headers.firstIndex(of: ":") {
+                    wsHost = String(headers[headers.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+                } else {
+                    wsHost = headers
+                }
+            }
+            if !wsHost.isEmpty { items.append(URLQueryItem(name: "host", value: wsHost)) }
+        }
+        if isReality {
+            if let fp = fields["reality-fingerprint"], !fp.isEmpty { items.append(URLQueryItem(name: "fp", value: fp)) }
+            if let pbk = fields["reality-public-key"], !pbk.isEmpty { items.append(URLQueryItem(name: "pbk", value: pbk)) }
+            if let sid = fields["reality-short-id"], !sid.isEmpty { items.append(URLQueryItem(name: "sid", value: sid)) }
+        }
+        if fields["skip-cert-verify"] == "true" { items.append(URLQueryItem(name: "allowInsecure", value: "1")) }
+        components.queryItems = items
+        components.fragment = displayName
+        guard let url = components.url?.absoluteString else {
+            return fail("节点「\(displayName)」未导入：无法生成链接")
+        }
+        return .success((displayName, url))
+    case "hysteria2", "hy2":
+        var components = URLComponents()
+        components.scheme = "hysteria2"
+        components.user = fields["password"] ?? fields["auth"] ?? ""
+        components.host = server
+        components.port = port
+        var items: [URLQueryItem] = []
+        let sni = fields["server-name"] ?? fields["sni"] ?? ""
+        if !sni.isEmpty { items.append(URLQueryItem(name: "sni", value: sni)) }
+        if fields["skip-cert-verify"] == "true" { items.append(URLQueryItem(name: "allowInsecure", value: "1")) }
+        if !items.isEmpty { components.queryItems = items }
+        components.fragment = displayName
+        guard let url = components.url?.absoluteString else {
+            return fail("节点「\(displayName)」未导入：无法生成链接")
+        }
+        return .success((displayName, url))
+    default:
+        return fail("节点「\(displayName)」未导入：暂不支持 \(proto) 协议")
+    }
+}
+
+/// Shadowrocket .conf -> ConfigData for the Shadowrocket
+/// side. Imports [Proxy] nodes, [Proxy Group] strategies,
+/// [Rule] rules/providers, and the [General] ipv6 switch.
+/// A .conf carries no subscription names, so a group's url=
+/// becomes a subscription named after the URL's host.
+/// The builtin Proxy group is skipped like the YAML import
+/// skips it, but its url= subscriptions are still harvested.
+func proxyImportedSRState(_ text: String) throws -> ProxyImportedConfig {
+    let sections = proxySRSections(text)
+    let hasContent = sections["General"] != nil || sections["Proxy"] != nil
+        || sections["Proxy Group"] != nil || sections["Rule"] != nil
+    guard hasContent else {
+        throw ProxyImportError.message("没有找到节点、策略组或规则")
+    }
+    var result = ConfigData(
+        subscriptions: [], nodeLinks: [], strategies: [], providers: [], rules: [],
+        fallback: ProxyFallback(cn: "DIRECT", defaultPolicy: "Proxy"),
+        ipv6: false
+    )
+    var warnings: [String] = []
+
+    for entry in sections["General"] ?? [] {
+        guard let eq = entry.text.firstIndex(of: "=") else { continue }
+        let key = String(entry.text[..<eq]).trimmingCharacters(in: .whitespaces).lowercased()
+        let value = String(entry.text[entry.text.index(after: eq)...]).trimmingCharacters(in: .whitespaces).lowercased()
+        if key == "ipv6" {
+            if value == "true" { result.ipv6 = true }
+            else if value == "false" { result.ipv6 = false }
+        }
+    }
+
+    var nodeNameSet = Set<String>()
+    for entry in sections["Proxy"] ?? [] {
+        switch proxySRNodeToLink(entry.text) {
+        case .success(let converted):
+            result.nodeLinks.append(ProxyNodeLink(id: newProxyID(), name: converted.name, url: converted.url))
+            nodeNameSet.insert(converted.name)
+        case .failure(let error):
+            warnings.append(error.localizedDescription)
+        }
+    }
+
+    var subscriptionByURL: [String: ProxySubscription] = [:]
+    func subscriptionID(for url: String) -> String {
+        if let existing = subscriptionByURL[url] { return existing.id }
+        var name = URLComponents(string: url)?.host ?? url
+        if name.isEmpty { name = url }
+        if result.subscriptions.contains(where: { $0.name == name }) {
+            var i = 2
+            while result.subscriptions.contains(where: { $0.name == "\(name) (\(i))" }) { i += 1 }
+            name = "\(name) (\(i))"
+        }
+        let sub = ProxySubscription(id: newProxyID(), key: name, name: name, url: url, interval: 86400)
+        result.subscriptions.append(sub)
+        subscriptionByURL[url] = sub
+        return sub.id
+    }
+
+    for entry in sections["Proxy Group"] ?? [] {
+        guard let eq = entry.text.firstIndex(of: "=") else {
+            warnings.append("策略组行未导入（缺少 =）：\(entry.text)")
+            continue
+        }
+        let groupName = String(entry.text[..<eq]).trimmingCharacters(in: .whitespaces)
+        let rest = String(entry.text[entry.text.index(after: eq)...])
+        let items = rest.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard let groupType = items.first,
+              ["select", "url-test", "fallback", "load-balance"].contains(groupType) else {
+            warnings.append("策略组「\(groupName)」未导入：类型不支持")
+            continue
+        }
+        var urls: [String] = []
+        var filter = ""
+        var plainItems: [String] = []
+        for item in items.dropFirst() {
+            if let ieq = item.firstIndex(of: "=") {
+                let key = String(item[..<ieq]).trimmingCharacters(in: .whitespaces).lowercased()
+                let value = String(item[item.index(after: ieq)...]).trimmingCharacters(in: .whitespaces)
+                if key == "url" && !value.isEmpty { urls.append(value) }
+                else if key == "policy-regex-filter" { filter = value }
+                continue
+            }
+            plainItems.append(item)
+        }
+        let subIDs = urls.map(subscriptionID)
+        guard groupName != "Proxy" else { continue }
+        if result.strategies.contains(where: { $0.name == groupName }) {
+            warnings.append("策略组「\(groupName)」重复，只保留第一个")
+            continue
+        }
+        var members: [String] = []
+        var nodeSources: [String] = []
+        var includeProxy = false
+        for item in plainItems {
+            if nodeNameSet.contains(item) {
+                if let node = result.nodeLinks.first(where: { $0.name == item }) {
+                    nodeSources.append(node.id)
+                }
+            } else if item == "Proxy" {
+                includeProxy = true
+            } else {
+                members.append(item)
+            }
+        }
+        let regions = proxyInferRegions(filter)
+        result.strategies.append(ProxyStrategy(
+            id: newProxyID(), name: groupName, type: groupType,
+            members: members.joined(separator: "\n"), uses: "",
+            sourceSubscriptions: subIDs, nodeSources: proxyUniqueValues(nodeSources),
+            regions: regions, customFilter: regions.isEmpty ? filter : "",
+            dialerProxy: "", includeProxy: includeProxy,
+            autoAllSubscriptions: false, autoAllNodes: false
+        ))
+    }
+
+    struct ParsedRule {
+        var name: String
+        var kind: String
+        var value: String
+        var policy: String
+        var noResolve: Bool
+    }
+    var parsedRules: [ParsedRule] = []
+    for entry in sections["Rule"] ?? [] {
+        var parts = entry.text.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let kind = parts.first, !kind.isEmpty else { continue }
+        var noResolve = false
+        if parts.last == "no-resolve" {
+            noResolve = true
+            parts.removeLast()
+        }
+        if kind == "AND" || kind == "OR" || kind == "NOT" {
+            warnings.append("组合规则暂不支持，已跳过：\(entry.text)")
+            continue
+        }
+        if kind == "FINAL" || kind == "MATCH" {
+            parsedRules.append(ParsedRule(
+                name: entry.comment, kind: "MATCH", value: "",
+                policy: parts.count > 1 ? parts[1] : "DIRECT", noResolve: noResolve))
+            continue
+        }
+        if kind == "RULE-SET" {
+            let url = parts.count > 1 ? parts[1] : ""
+            let policy = parts.count > 2 ? parts[2] : "DIRECT"
+            let providerName = entry.comment.isEmpty ? (URLComponents(string: url)?.host ?? url) : entry.comment
+            result.providers.append(ProxyProvider(
+                id: newProxyID(), key: providerName, name: providerName, url: url,
+                behavior: "classical", policy: policy))
+            continue
+        }
+        parsedRules.append(ParsedRule(
+            name: entry.comment, kind: kind,
+            value: parts.count > 1 ? parts[1] : "",
+            policy: parts.count > 2 ? parts[2] : "DIRECT", noResolve: noResolve))
+    }
+    func containsCNOrDomestic(_ s: String) -> Bool {
+        s.contains("CN") || s.contains("国内")
+    }
+    func containsDefault(_ s: String) -> Bool {
+        s.contains("默认") || s.contains("兜底")
+    }
+    var cnIndex = parsedRules.firstIndex { $0.kind == "GEOIP" && $0.value == "CN" && containsCNOrDomestic($0.name) } ?? -1
+    if cnIndex < 0 {
+        cnIndex = parsedRules.lastIndex { $0.kind == "GEOIP" && $0.value == "CN" } ?? -1
+    }
+    var defaultIndex = parsedRules.firstIndex { $0.kind == "MATCH" && containsDefault($0.name) } ?? -1
+    if defaultIndex < 0 {
+        defaultIndex = parsedRules.lastIndex { $0.kind == "MATCH" } ?? -1
+    }
+    if cnIndex >= 0 { result.fallback.cn = parsedRules[cnIndex].policy }
+    if defaultIndex >= 0 { result.fallback.defaultPolicy = parsedRules[defaultIndex].policy }
+    for (index, rule) in parsedRules.enumerated() {
+        if index == cnIndex || index == defaultIndex { continue }
+        result.rules.append(ProxyRule(
+            id: newProxyID(), name: rule.name, kind: rule.kind, value: rule.value,
+            policy: rule.policy, noResolve: rule.noResolve
+        ))
+    }
+    return ProxyImportedConfig(config: result, warnings: warnings)
+}

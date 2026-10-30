@@ -4,16 +4,18 @@ import UniformTypeIdentifiers
 
 /// Output screen for the software selected at the top of the
 /// editor — no format switch here anymore. Shows that side's
-/// generated config with copy, share-as-file, and YAML import
-/// (paste or file — via a UIKit document picker, since
+/// generated config with copy, share-as-file, and unified
+/// import (paste or file — via a UIKit document picker, since
 /// SwiftUI.fileImporter never completes on the user's device).
-/// Import always writes to the Clash side, like the page:
-/// the Shadowrocket side is left untouched.
+/// Import auto-detects the format: YAML replaces the Clash
+/// side, .conf replaces the Shadowrocket side; the other side
+/// is left untouched.
 struct ProxyOutputView: View {
     @Binding var draft: ConfigData
     let software: ProxySoftware
     let configName: String
     let onImportClash: (ConfigData) -> Void
+    let onImportShadowrocket: (ConfigData) -> Void
 
     @State private var clashFilename = "clash-config"
     @State private var srFilename = "shadowrocket-config"
@@ -71,7 +73,7 @@ struct ProxyOutputView: View {
                 .buttonStyle(.bordered)
                 Button("分享文件") { share() }
                     .buttonStyle(.borderedProminent)
-                Button("导入 YAML") { showingImport = true }
+                Button("导入配置") { showingImport = true }
                     .buttonStyle(.bordered)
             }
             .padding()
@@ -87,8 +89,12 @@ struct ProxyOutputView: View {
             }
         }
         .sheet(isPresented: $showingImport) {
-            ProxyImportSheet { imported in
-                onImportClash(imported)
+            ProxyImportSheet { imported, side in
+                if side == .shadowrocket {
+                    onImportShadowrocket(imported)
+                } else {
+                    onImportClash(imported)
+                }
                 showingImport = false
             }
         }
@@ -112,13 +118,22 @@ struct ProxyOutputView: View {
 
 }
 
-private struct ProxyImportSheet: View {
-    let onConfirm: (ConfigData) -> Void
+/// Shared by the editor and the output page. Detects the
+/// format from the text: [Section] headers mean Shadowrocket
+/// .conf, anything else is tried as Clash YAML. The confirm
+/// dialog names the side that will be replaced.
+struct ProxyImportSheet: View {
+    let onConfirm: (ConfigData, ProxySoftware) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var importText = ""
     @State private var importError = ""
-    @State private var pendingImport: ProxyImportedConfig?
+    @State private var pendingImport: PendingImport?
     @State private var showingFilePicker = false
+
+    private struct PendingImport {
+        var imported: ProxyImportedConfig
+        var side: ProxySoftware
+    }
 
     var body: some View {
         NavigationStack {
@@ -127,14 +142,14 @@ private struct ProxyImportSheet: View {
                     .frame(minHeight: 300)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                Text("粘贴 Clash YAML，或从文件选择。解析后需确认才会替换 Clash 配置；Shadowrocket 配置不会改变。节点不写回订阅，改为单个节点。")
+                Text("粘贴 Clash YAML 或 Shadowrocket .conf，或从文件选择。识别格式后替换对应一侧的配置，另一侧不受影响。YAML 节点不写回订阅，改为单个节点；.conf 的策略组订阅地址会按域名新建订阅。")
                     .font(.caption)
                     .foregroundColor(.gray)
                 if !importError.isEmpty {
                     Text(importError).foregroundColor(.red).font(.caption)
                 }
             }
-            .navigationTitle("导入 Clash YAML")
+            .navigationTitle("导入配置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -148,29 +163,29 @@ private struct ProxyImportSheet: View {
                 }
             }
             .sheet(isPresented: $showingFilePicker) {
-                ProxyYamlPicker { data in
+                ProxyImportFilePicker { data in
                     showingFilePicker = false
                     importText = String(data: data, encoding: .utf8) ?? ""
                     parseImport(importText)
                 }
             }
-            .alert("确认替换 Clash 配置？", isPresented: Binding(
+            .alert(pendingImport?.side == .shadowrocket ? "确认替换 Shadowrocket 配置？" : "确认替换 Clash 配置？", isPresented: Binding(
                 get: { pendingImport != nil },
                 set: { if !$0 { pendingImport = nil } }
             )) {
                 Button("取消", role: .cancel) { pendingImport = nil }
                 Button("替换", role: .destructive) {
                     if let pendingImport {
-                        onConfirm(pendingImport.config)
+                        onConfirm(pendingImport.imported.config, pendingImport.side)
                     }
                     pendingImport = nil
                 }
             } message: {
                 if let pendingImport {
-                    let counts = pendingImport.config
-                    let warns = pendingImport.warnings.isEmpty
+                    let counts = pendingImport.imported.config
+                    let warns = pendingImport.imported.warnings.isEmpty
                         ? ""
-                        : "\n警告：\n" + pendingImport.warnings.joined(separator: "\n")
+                        : "\n警告：\n" + pendingImport.imported.warnings.joined(separator: "\n")
                     Text("将替换为：\(counts.subscriptions.count) 订阅、\(counts.nodeLinks.count) 单节点、\(counts.strategies.count) 策略、\(counts.providers.count) 规则集、\(counts.rules.count) 分流规则。\(warns)")
                 }
             }
@@ -179,7 +194,11 @@ private struct ProxyImportSheet: View {
 
     private func parseImport(_ text: String) {
         do {
-            pendingImport = try proxyImportedState(text)
+            let side = proxyDetectImportFormat(text)
+            let imported = side == .shadowrocket
+                ? try proxyImportedSRState(text)
+                : try proxyImportedState(text)
+            pendingImport = PendingImport(imported: imported, side: side)
             importError = ""
         } catch {
             importError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -197,16 +216,17 @@ private struct ProxyShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
-/// Own YAML picker: the app's DocumentPicker hardcodes
+/// Own config picker: the app's DocumentPicker hardcodes
 /// UTType.html, and SwiftUI.fileImporter never completes on
-/// the user's device, so this presenter takes yaml/yml/text.
-private struct ProxyYamlPicker: UIViewControllerRepresentable {
+/// the user's device, so this presenter takes yaml/yml/conf/text.
+private struct ProxyImportFilePicker: UIViewControllerRepresentable {
     let onPick: (Data) -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let types = [
             UTType(filenameExtension: "yaml"),
             UTType(filenameExtension: "yml"),
+            UTType(filenameExtension: "conf"),
             UTType.plainText
         ].compactMap { $0 }
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
