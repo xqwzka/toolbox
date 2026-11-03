@@ -12,6 +12,7 @@ import SwiftUI
 enum ToolboxTab: String, CaseIterable {
     case ledger = "记账"
     case cardcodes = "卡密"
+    case images = "图片"
     case web = "网页"
     case download = "下载"
     case proxy = "代理规则"
@@ -54,6 +55,8 @@ struct ToolboxRootView: View {
                     LedgerRootView()
                 case .cardcodes:
                     CardCodesRootView()
+                case .images:
+                    ImagesRootView()
                 case .web:
                     WebRootView()
                 case .download:
@@ -141,6 +144,15 @@ struct SwitcherView: View {
                         isCurrent: current == .cardcodes
                     ) {
                         onSelect(.cardcodes)
+                    }
+                    SwitcherRow(
+                        icon: "photo.fill",
+                        color: .pink,
+                        title: "图片",
+                        subtitle: "图片库 · 点按复制图片",
+                        isCurrent: current == .images
+                    ) {
+                        onSelect(.images)
                     }
                     SwitcherRow(
                         icon: "doc.text",
@@ -278,6 +290,15 @@ struct LauncherView: View {
                     isCurrent: false
                 ) {
                     onSelect(.cardcodes)
+                }
+                SwitcherRow(
+                    icon: "photo.fill",
+                    color: .pink,
+                    title: "图片",
+                    subtitle: "图片库 · 点按复制图片",
+                    isCurrent: false
+                ) {
+                    onSelect(.images)
                 }
                 SwitcherRow(
                     icon: "doc.text",

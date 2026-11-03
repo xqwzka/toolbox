@@ -1,10 +1,10 @@
 import SwiftUI
 import SwiftData
 
-/// 工具箱: 记账 + 卡密 + 本地网页 + 代理规则 in one app. All four keep
-/// their own UI and their own data, all local-only: no account,
-/// no sync, no network. The two SwiftData stores live in one
-/// container; the web viewer keeps its loopback server and
+/// 工具箱: 记账 + 卡密 + 图片 + 本地网页 + 下载 + 代理规则 in one app.
+/// Each keeps its own UI and its own data, all local-only: no
+/// account, no sync, no network. The SwiftData stores live in
+/// one container; the web viewer keeps its loopback server and
 /// non-persistent page store exactly as before.
 @main
 struct ToolboxApp: App {
@@ -16,7 +16,7 @@ struct ToolboxApp: App {
     }
 
     private let container: ModelContainer = {
-        let schema = Schema([LedgerRecord.self, CardCode.self, ProxyConfig.self])
+        let schema = Schema([LedgerRecord.self, CardCode.self, ProxyConfig.self, StoredImage.self])
         let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
             return try ModelContainer(for: schema, configurations: [configuration])

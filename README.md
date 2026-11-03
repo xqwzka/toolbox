@@ -10,6 +10,10 @@
 
 新界面：粘贴分享链接或口令，解析后下载视频或单张图片到相册。抖音 / 小红书 / 快手 / B站走洛天，Instagram 走 socialdownloader，X 走 vxTwitter/fxTwitter，YouTube 走 Invidious（视频轨 + 音频轨本机合成，取最高画质）；也可填自建 cobalt 实例地址（最高画质）走 YouTube / X / Instagram。仅支持公开内容。
 
+## 图片
+
+独立图片库：从相册多选导入（不用完整相册权限）或从文件导入，图片文件存在 Documents/images，数据库只存文件名。点缩略图即复制图片到系统剪贴板，长按可查看大图或删除。
+
 ## 数据
 
 - 记账和卡密共用一个 SwiftData 存储（LedgerRecord、CardCode）。
