@@ -13,9 +13,17 @@ import UIKit
 final class StoredImage {
     var fileName: String
     var createdAt: Date
+    /// Short note shown under the thumbnail, in noteColor.
+    /// Declaration defaults (not just init defaults) so
+    /// records imported before notes existed migrate
+    /// cleanly: empty note, pink text.
+    var note: String = ""
+    var noteColor: String = "pink"
 
-    init(fileName: String, createdAt: Date = Date()) {
+    init(fileName: String, note: String = "", noteColor: String = "pink", createdAt: Date = Date()) {
         self.fileName = fileName
+        self.note = note
+        self.noteColor = noteColor
         self.createdAt = createdAt
     }
 

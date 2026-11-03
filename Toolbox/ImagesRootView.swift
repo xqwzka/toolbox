@@ -45,7 +45,7 @@ struct ImagesRootView: View {
                             Text("点图片即复制")
                                 .font(.subheadline)
                                 .fontWeight(.semibold)
-                            Text("长按可查看大图 / 删除")
+                            Text("长按可编辑备注 / 删除")
                                 .font(.caption)
                                 .foregroundColor(.gray)
                         }
@@ -75,7 +75,17 @@ struct ImagesRootView: View {
                                     Button {
                                         copy(item)
                                     } label: {
-                                        ImageThumbView(item: item)
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            ImageThumbView(item: item)
+                                            if !item.note.isEmpty {
+                                                Text(item.note)
+                                                    .font(.caption)
+                                                    .fontWeight(.semibold)
+                                                    .foregroundColor(imageNoteColor(item.noteColor))
+                                                    .lineLimit(2)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                            }
+                                        }
                                     }
                                     .buttonStyle(.plain)
                                     .contextMenu {
@@ -83,6 +93,11 @@ struct ImagesRootView: View {
                                             viewingImage = item
                                         } label: {
                                             Label("查看大图", systemImage: "eye")
+                                        }
+                                        Button {
+                                            viewingImage = item
+                                        } label: {
+                                            Label("编辑备注", systemImage: "pencil")
                                         }
                                         Button {
                                             copy(item)
@@ -145,6 +160,9 @@ struct ImagesRootView: View {
                 }, onDelete: {
                     delete(item)
                     viewingImage = nil
+                }, onSaveNote: {
+                    viewingImage = nil
+                    showToast("备注已保存")
                 })
             }
         }
@@ -242,29 +260,119 @@ private struct ImageThumbView: View {
     }
 }
 
-/// Full-size preview with explicit copy and delete actions.
-/// Copy dismisses back to the grid so the "已复制图片"
-/// toast underneath is visible.
+/// Note colour options: the stored value is the name, so
+/// the record stays a plain string and new colours can be
+/// added without another migration.
+private let imageNoteColorOptions: [(name: String, color: Color, label: String)] = [
+    ("pink", .pink, "粉"),
+    ("blue", .blue, "蓝"),
+    ("green", .green, "绿"),
+    ("orange", .orange, "橙"),
+    ("purple", .purple, "紫"),
+    ("gray", .gray, "灰"),
+]
+
+private func imageNoteColor(_ name: String) -> Color {
+    imageNoteColorOptions.first(where: { $0.name == name })?.color ?? .pink
+}
+
+/// Full-size preview with explicit copy and delete actions,
+/// plus the note editor: a text field and a colour-dot row.
+/// Copy and note-save both dismiss back to the grid so the
+/// toast underneath is visible. Editing follows the card
+/// editor's pattern — local @State, written back to the
+/// record only on 保存, so cancelling discards the edit.
 private struct ImageDetailView: View {
     let item: StoredImage
     let onCopy: () -> Void
     let onDelete: () -> Void
+    let onSaveNote: () -> Void
     @Environment(\.dismiss) private var dismiss
+
+    @State private var note: String
+    @State private var noteColor: String
+
+    init(item: StoredImage, onCopy: @escaping () -> Void, onDelete: @escaping () -> Void, onSaveNote: @escaping () -> Void) {
+        self.item = item
+        self.onCopy = onCopy
+        self.onDelete = onDelete
+        self.onSaveNote = onSaveNote
+        _note = State(initialValue: item.note)
+        _noteColor = State(initialValue: item.noteColor)
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                if let image = item.image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity)
-                } else {
-                    Text("这张图读不出来")
-                        .foregroundColor(.gray)
-                        .padding(.top, 48)
+                VStack(alignment: .leading, spacing: 16) {
+                    if let image = item.image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        Text("这张图读不出来")
+                            .foregroundColor(.gray)
+                            .padding(.top, 48)
+                    }
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("备注")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                        TextField("给这张图写个备注", text: $note)
+                            .padding(10)
+                            .background(Color.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        HStack(spacing: 14) {
+                            Text("颜色")
+                                .font(.subheadline)
+                                .foregroundColor(.gray)
+                            ForEach(imageNoteColorOptions, id: \.name) { option in
+                                Button {
+                                    noteColor = option.name
+                                } label: {
+                                    ZStack {
+                                        Circle()
+                                            .fill(option.color)
+                                            .frame(width: 28, height: 28)
+                                        if noteColor == option.name {
+                                            Image(systemName: "checkmark")
+                                                .font(.caption)
+                                                .fontWeight(.bold)
+                                                .foregroundColor(.white)
+                                        }
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            Spacer()
+                        }
+                        if !note.trimmingCharacters(in: .whitespaces).isEmpty {
+                            Text(note.trimmingCharacters(in: .whitespaces))
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundColor(imageNoteColor(noteColor))
+                        }
+                        Button {
+                            item.note = note.trimmingCharacters(in: .whitespaces)
+                            item.noteColor = noteColor
+                            onSaveNote()
+                        } label: {
+                            Text("保存备注")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(Color.pink)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 16)
                 }
+                .padding(.bottom, 24)
             }
+            .background(CardTheme.background.ignoresSafeArea())
             .navigationTitle("图片")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
